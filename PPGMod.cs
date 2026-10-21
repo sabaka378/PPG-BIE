@@ -19,7 +19,7 @@ namespace PPGMod
     }
 
     // ================= ПЛАГИН =================
-    [BepInPlugin("com.yourname.ppgmod", "PPG Mod", "1.0.0")]
+    [BepInPlugin("com.sabaka.ppgmod", "PPG Mod", "1.15")]
     public class Plugin : BaseUnityPlugin
     {
         public const float MaxRotationSpeed = 25000f;
@@ -33,14 +33,8 @@ namespace PPGMod
             try
             {
                 Physics2D.maxRotationSpeed = MaxRotationSpeed;
-
-                int nukeMask = LayerMask.GetMask("Objects", "Bounds");
-                if (nukeMask == 0)
-                    Log.LogWarning("LayerMask 'Objects'/'Bounds' returned 0");
-
                 var harmony = new Harmony("com.yourname.ppgmod");
                 harmony.PatchAll();
-
                 Log.LogInfo("=== Plugin Awake COMPLETE ===");
             }
             catch (Exception ex)
@@ -93,10 +87,26 @@ namespace PPGMod
             var invisibleMarker = __instance.GetComponent<InvisibleWireMarker>();
             var fastMarker = __instance.GetComponent<FastWireMarker>();
 
-            if (KeyState.K_enable && invisibleMarker == null)
+            if (!KeyState.K_enable)
             {
-                invisibleMarker = __instance.gameObject.AddComponent<InvisibleWireMarker>();
+                if (invisibleMarker != null)
+                {
+                    UnityEngine.Object.Destroy(invisibleMarker);
+                    invisibleMarker = null;
+                }
+                if (lr != null)
+                {
+                    lr.enabled = true;
+                    lr.startColor = Color.white;
+                    lr.endColor = Color.white;
+                }
+            }
+            else
+            {
+                if (invisibleMarker == null)
+                    invisibleMarker = __instance.gameObject.AddComponent<InvisibleWireMarker>();
                 invisibleMarker.IsInvisible = true;
+                if (lr != null) lr.enabled = false;
             }
 
             if (KeyState.L_enable && fastMarker == null)
@@ -110,13 +120,53 @@ namespace PPGMod
                 }
             }
 
-            bool shouldBeInvisible = invisibleMarker != null && invisibleMarker.IsInvisible;
-            if (lr != null) lr.enabled = !shouldBeInvisible;
-
             if (fastMarker != null && fastMarker.IsFast)
             {
                 if (__instance.physicalBehaviour != null)
                     __instance.physicalBehaviour.ActivationPropagationDelay = 0f;
+            }
+        }
+    }
+
+    // ================= МАРКЕР БЕСКОНЕЧНОГО ПРОВОДА =================
+    public class InfiniteWireMarker : MonoBehaviour { }
+
+    [HarmonyPatch(typeof(WireBehaviour), "Initialise")]
+    public static class InfiniteWirePatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(WireBehaviour __instance)
+        {
+            if (__instance == null) return;
+
+            // P зажата при создании — провод бесконечный
+            if (!Input.GetKey(KeyCode.P)) return;
+
+            // Пропускаем ТОЛЬКО фиксирующие и жёсткие провода
+            string typeName = __instance.GetType().Name;
+            if (typeName.Contains("Fixed") || typeName.Contains("Rigid") ||
+                typeName.Contains("Chain") || typeName.Contains("Spring"))
+                return;
+
+            // Ставим маркер
+            if (__instance.GetComponent<InfiniteWireMarker>() == null)
+                __instance.gameObject.AddComponent<InfiniteWireMarker>();
+
+            // Ищем DistanceJoint2D
+            var distanceJoint = __instance.GetComponent<DistanceJoint2D>();
+            if (distanceJoint != null)
+            {
+                // КЛЮЧЕВОЙ ФИКС: maxDistanceOnly = true
+                // Провод становится "верёвкой": не мешает сближаться, но не даёт разойтись дальше distance
+                distanceJoint.maxDistanceOnly = true;
+
+                // Ставим огромную максимальную длину (не фиксированную!)
+                distanceJoint.distance = 999999f;
+                distanceJoint.autoConfigureDistance = false;
+
+                // Не даём проводу порваться от сил
+                distanceJoint.breakForce = float.MaxValue;
+                distanceJoint.breakTorque = float.MaxValue;
             }
         }
     }
@@ -252,10 +302,8 @@ namespace PPGMod
             if (States.TryGetValue(__instance, out var old) && old.Joint != null)
                 UnityEngine.Object.Destroy(old.Joint);
 
-            // Проверяем маркер — сохраняется в постройке
             bool noGearRatio = __instance.GetComponent<BeltNoGearRatioMarker>() != null;
 
-            // Если L зажата при создании — ставим маркер
             if (KeyState.L_enable && __instance.GetComponent<BeltNoGearRatioMarker>() == null)
             {
                 __instance.gameObject.AddComponent<BeltNoGearRatioMarker>();
@@ -296,18 +344,20 @@ namespace PPGMod
         [HarmonyPatch("FixedUpdate")]
         static bool FixedUpdatePrefix(SerpentineBeltBehaviour __instance)
         {
-            if (__instance.Self == null || __instance.Other == null) return false;
-            if (__instance.Self == __instance.Other) return false;
-            if (__instance.Self.rigidbody == null || __instance.Other.rigidbody == null) return false;
+            if (__instance.Self == null || __instance.Other == null) return true;
+            if (__instance.Self == __instance.Other) return true;
+            if (__instance.Self.rigidbody == null || __instance.Other.rigidbody == null) return true;
 
             if (!States.TryGetValue(__instance, out var state) || state.Joint == null)
             {
                 StartPostfix(__instance);
-                return false;
+                return true;
             }
 
+            if (state.NoGearRatio) return false;
+
             float ratio = state.GearRatio;
-            if (!state.NoGearRatio && GearRatioField != null)
+            if (GearRatioField != null)
             {
                 ratio = (float)GearRatioField.GetValue(__instance);
                 if (ratio <= 0f) ratio = 1f;
@@ -341,11 +391,44 @@ namespace PPGMod
         }
     }
 
-    // ================= PULSE DRUM FIX =================
+    // ================= PULSE DRUM: VANILLA / EXPLODE =================
+    public class PulseDrumModeMarker : MonoBehaviour
+    {
+        public bool ExplodeMode = false;
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class PulseDrumModeMenuPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null) return;
+            var pd = __instance.GetComponent<PulseDrumBehaviour>();
+            if (pd == null) return;
+
+            var buttons = __instance.ContextMenuOptions.Buttons;
+            if (buttons == null) return;
+
+            for (int i = 0; i < buttons.Count; i++)
+                if (buttons[i].Identity == "pulseDrumMode") return;
+
+            var marker = pd.GetComponent<PulseDrumModeMarker>();
+            if (marker == null) marker = pd.gameObject.AddComponent<PulseDrumModeMarker>();
+
+            buttons.Add(new ContextMenuButton(
+                "pulseDrumMode",
+                () => marker.ExplodeMode ? "Switch mode: Vanilla" : "Switch mode: Explode",
+                "Switch between vanilla pulse and explosive mode",
+                new UnityAction[] { delegate () { marker.ExplodeMode = !marker.ExplodeMode; } }
+            ));
+        }
+    }
+
     [HarmonyPatch(typeof(PulseDrumBehaviour), "Shoot")]
     public static class PulseDrumFixPatch
     {
-        private static readonly RaycastHit2D[] _buffer = new RaycastHit2D[16];
+        private static readonly RaycastHit2D[] _buffer = new RaycastHit2D[32];
 
         [HarmonyPrefix]
         static bool Prefix(PulseDrumBehaviour __instance)
@@ -357,23 +440,84 @@ namespace PPGMod
             if (__instance.Source != null && __instance.Clips != null && __instance.Clips.Length > 0)
                 __instance.Source.PlayOneShot(__instance.Clips[UnityEngine.Random.Range(0, __instance.Clips.Length)]);
 
+            var marker = __instance.GetComponent<PulseDrumModeMarker>();
+            bool explodeMode = marker != null && marker.ExplodeMode;
+
             Vector2 pos = __instance.BarrelPosition;
             Vector2 dir = __instance.BarrelDirection;
             float force = __instance.BaseForce + __instance.PhysicalBehaviour.Charge * __instance.ChargeInfluence;
 
             __instance.PhysicalBehaviour.rigidbody.AddForceAtPosition(-force * dir, pos);
 
+            if (explodeMode)
+            {
+                float explosionForce = 150f + __instance.PhysicalBehaviour.Charge * 60f;
+                float radius = 2.5f + __instance.PhysicalBehaviour.Charge * 0.1f;
+                int rayCount = 32;
+
+                int mask = LayerMask.GetMask("Objects", "Bounds");
+                if (mask == 0) mask = ~0;
+
+                for (int i = 0; i < rayCount; i++)
+                {
+                    float angle = (360f / rayCount) * i;
+                    Vector2 rayDir = Quaternion.Euler(0f, 0f, angle) * Vector2.right;
+
+                    int hitCount = Physics2D.RaycastNonAlloc(pos, rayDir, _buffer, radius, mask);
+
+                    float bestDist = float.MaxValue;
+                    int bestIndex = -1;
+                    for (int j = 0; j < hitCount; j++)
+                    {
+                        var h = _buffer[j];
+                        if (h.transform == null) continue;
+                        if (h.distance < bestDist)
+                        {
+                            bestDist = h.distance;
+                            bestIndex = j;
+                        }
+                    }
+
+                    if (bestIndex >= 0)
+                    {
+                        var hit = _buffer[bestIndex];
+                        PhysicalBehaviour pb;
+                        if (Global.main.PhysicalObjectsInWorldByTransform.TryGetValue(hit.transform, out pb))
+                        {
+                            if (pb.rigidbody != null && pb != __instance.PhysicalBehaviour)
+                            {
+                                Vector2 targetPos = pb.transform.position;
+                                Vector2 checkDir = targetPos - pos;
+                                float checkDist = checkDir.magnitude;
+                                if (checkDist > 0.01f)
+                                {
+                                    var wallHit = Physics2D.Raycast(pos, checkDir.normalized, checkDist, mask);
+                                    if (wallHit.collider != null && wallHit.collider != hit.collider)
+                                        continue;
+                                }
+
+                                float falloff = 1f - (bestDist / radius);
+                                Vector3 v = explosionForce * falloff * pb.rigidbody.mass * rayDir;
+                                pb.rigidbody.AddForceAtPosition(v, hit.point);
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            }
+
             float halfSpread = __instance.SpreadAngle / 2f;
             float halfEmitter = __instance.EmitterSize / 2f;
-            int rayCount = __instance.RayCount;
-            float step = rayCount > 1 ? (float)(rayCount - 1) : 1f;
+            int rayCountV = __instance.RayCount;
+            float step = rayCountV > 1 ? (float)(rayCountV - 1) : 1f;
 
-            int mask = __instance.Layers;
+            int maskV = __instance.Layers;
             int boundsLayer = LayerMask.NameToLayer("Bounds");
             if (boundsLayer >= 0)
-                mask &= ~(1 << boundsLayer);
+                maskV &= ~(1 << boundsLayer);
 
-            for (int i = 0; i < rayCount; i++)
+            for (int i = 0; i < rayCountV; i++)
             {
                 float t = i / step;
                 float angle = t * __instance.SpreadAngle - halfSpread;
@@ -382,7 +526,7 @@ namespace PPGMod
                 Vector3 rayDir = Quaternion.Euler(0f, 0f, angle) * dir;
                 Vector2 origin = pos + Vector2.Perpendicular(dir) * offset;
 
-                int hitCount = Physics2D.RaycastNonAlloc(origin, rayDir, _buffer, __instance.Range, mask);
+                int hitCount = Physics2D.RaycastNonAlloc(origin, rayDir, _buffer, __instance.Range, maskV);
 
                 float bestDist = float.MaxValue;
                 int bestIndex = -1;
@@ -452,10 +596,7 @@ namespace PPGMod
             typeof(BloodContainer).GetField("cachedComputedColour",
                 BindingFlags.Instance | BindingFlags.NonPublic);
 
-        private void Awake()
-        {
-            phys = GetComponent<PhysicalBehaviour>();
-        }
+        private void Awake() { phys = GetComponent<PhysicalBehaviour>(); }
 
         private void Update()
         {
@@ -484,10 +625,7 @@ namespace PPGMod
                 if (sr != null) Tint = sr.color;
                 firstSpawned = false;
             }
-            else if (Tint != Color.white)
-            {
-                SetTint(Tint);
-            }
+            else if (Tint != Color.white) SetTint(Tint);
 
             if (phys == null || phys.ContextMenuOptions == null) return;
             var buttons = phys.ContextMenuOptions.Buttons;
@@ -516,9 +654,7 @@ namespace PPGMod
         public void SetTint(Color color)
         {
             Tint = color;
-
-            foreach (var o in overlays)
-                if (o.overlay != null) Destroy(o.overlay.gameObject);
+            foreach (var o in overlays) if (o.overlay != null) Destroy(o.overlay.gameObject);
             overlays.Clear();
 
             ApplyOverlayTo(GetComponent<SpriteRenderer>(), color);
@@ -535,8 +671,7 @@ namespace PPGMod
             }
 
             var blood = GetComponent<BloodContainer>();
-            if (blood != null && GetComponent<LimbBehaviour>() == null)
-                SetCachedComputedColour(blood, color);
+            if (blood != null && GetComponent<LimbBehaviour>() == null) SetCachedComputedColour(blood, color);
 
             var display = GetComponent<DisplayBehaviour>();
             var thermo = GetComponent<ThermometerBehaviour>();
@@ -548,8 +683,7 @@ namespace PPGMod
                     var jitter = textT.GetComponent<HologramJitter>();
                     if (jitter != null) Destroy(jitter);
                 }
-                if (display != null && display.TextMesh != null)
-                    display.TextMesh.color = color;
+                if (display != null && display.TextMesh != null) display.TextMesh.color = color;
             }
         }
 
@@ -569,8 +703,8 @@ namespace PPGMod
             overlay.sortingLayerName = baseSR.sortingLayerName;
             overlay.sortingOrder = baseSR.sortingOrder + 1;
 
-            if (baseSR.sharedMaterial != null)
-                overlay.sharedMaterial = baseSR.sharedMaterial;
+            var defaultMat = ModAPI.FindMaterial("Sprites-Default");
+            if (defaultMat != null) overlay.sharedMaterial = defaultMat;
 
             overlay.color = color;
             overlay.enabled = color.a > 0.01f;
@@ -578,16 +712,11 @@ namespace PPGMod
             overlays.Add(new Ovl { overlay = overlay, baseSR = baseSR, lastSprite = baseSR.sprite });
         }
 
-        private void OnDestroy()
-        {
-            foreach (var o in overlays)
-                if (o.overlay != null) Destroy(o.overlay.gameObject);
-        }
+        private void OnDestroy() { foreach (var o in overlays) if (o.overlay != null) Destroy(o.overlay.gameObject); }
 
         private static void SetCachedComputedColour(BloodContainer bc, Color color)
         {
-            if (CachedColourField != null)
-                CachedColourField.SetValue(bc, color);
+            if (CachedColourField != null) CachedColourField.SetValue(bc, color);
         }
     }
 
@@ -603,30 +732,20 @@ namespace PPGMod
         {
             rb = GetComponent<Rigidbody2D>();
             if (rb == null) return;
-
             _pb = GetComponent<PhysicalBehaviour>();
 
             if (_pb != null && _pb.ContextMenuOptions != null)
             {
                 var buttons = _pb.ContextMenuOptions.Buttons;
                 for (int i = buttons.Count - 1; i >= 0; i--)
-                    if (buttons[i].Identity == "AddRpmDisplay")
-                        buttons.RemoveAt(i);
+                    if (buttons[i].Identity == "AddRpmDisplay") buttons.RemoveAt(i);
             }
 
             var holo = ModAPI.FindSpawnable("Holographic Display");
-            if (holo == null || holo.Prefab == null)
-            {
-                Plugin.Log.LogWarning("[PPGMod] Holographic Display prefab not found");
-                return;
-            }
+            if (holo == null || holo.Prefab == null) return;
 
             var textT = holo.Prefab.transform.Find("Text");
-            if (textT == null)
-            {
-                Plugin.Log.LogWarning("[PPGMod] Holographic Display has no 'Text' child");
-                return;
-            }
+            if (textT == null) return;
 
             holder = new GameObject("RpmHolder");
             var cloned = Instantiate(textT.gameObject, holder.transform);
@@ -655,26 +774,20 @@ namespace PPGMod
         private void OnDestroy()
         {
             if (holder != null) Destroy(holder);
-
             if (_pb != null && _pb.ContextMenuOptions != null)
             {
                 var buttons = _pb.ContextMenuOptions.Buttons;
-
                 for (int i = buttons.Count - 1; i >= 0; i--)
-                    if (buttons[i].Identity == "RemoveRpmDisplay")
-                        buttons.RemoveAt(i);
-
+                    if (buttons[i].Identity == "RemoveRpmDisplay") buttons.RemoveAt(i);
                 bool hasAdd = false;
                 for (int i = 0; i < buttons.Count; i++)
                     if (buttons[i].Identity == "AddRpmDisplay") { hasAdd = true; break; }
-
                 if (!hasAdd)
                 {
                     buttons.Add(new ContextMenuButton(
                         "AddRpmDisplay", "Add RPM Display", "Shows RPM and angular velocity",
                         new UnityAction[] { delegate () {
-                            if (_pb.GetComponent<RpmDisplay>() == null)
-                                _pb.gameObject.AddComponent<RpmDisplay>();
+                            if (_pb.GetComponent<RpmDisplay>() == null) _pb.gameObject.AddComponent<RpmDisplay>();
                         }}));
                 }
             }
@@ -695,24 +808,17 @@ namespace PPGMod
                 if (buttons[i].Identity == "AddRpmDisplay") return;
 
             var btn = new ContextMenuButton(
-                "AddRpmDisplay",
-                "Add RPM Display",
-                "Shows RPM and angular velocity above the object",
+                "AddRpmDisplay", "Add RPM Display", "Shows RPM and angular velocity above the object",
                 new UnityAction[] { delegate () {
-                    if (__instance.GetComponent<RpmDisplay>() == null)
-                        __instance.gameObject.AddComponent<RpmDisplay>();
-                }}
-            );
+                    if (__instance.GetComponent<RpmDisplay>() == null) __instance.gameObject.AddComponent<RpmDisplay>();
+                }});
             btn.LabelWhenMultipleAreSelected = "Add RPM Display";
             buttons.Add(btn);
         }
     }
 
-    // ================= CHANGE GRIP (только для Wheel) =================
-    public class WheelGripMarker : MonoBehaviour
-    {
-        public float GripValue = 70f;
-    }
+    // ================= CHANGE GRIP =================
+    public class WheelGripMarker : MonoBehaviour { public float GripValue = 70f; }
 
     [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
     public static class WheelGripMenuPatch
@@ -729,21 +835,17 @@ namespace PPGMod
             var marker = __instance.GetComponent<WheelGripMarker>();
             if (marker == null) marker = __instance.gameObject.AddComponent<WheelGripMarker>();
 
-            // Всегда применяем grip (в т.ч. при загрузке постройки)
             ApplyGrip(__instance, marker.GripValue);
 
             for (int i = 0; i < buttons.Count; i++)
                 if (buttons[i].Identity == "changeGrip") return;
 
             buttons.Add(new ContextMenuButton(
-                "changeGrip",
-                "Change grip",
-                "Set wheel grip. 70 = vanilla, 100 = maximum (no sliding)",
+                "changeGrip", "Change grip", "Set wheel grip. 70 = vanilla, 100 = maximum (no sliding)",
                 new UnityAction[] { delegate ()
                 {
                     var m = __instance.GetComponent<WheelGripMarker>();
                     if (m == null) return;
-
                     Utils.OpenFloatInputDialog<WheelGripMarker>(
                         m.GripValue, m,
                         (WheelGripMarker mk, float v) =>
@@ -752,23 +854,16 @@ namespace PPGMod
                             ApplyGrip(__instance, mk.GripValue);
                         },
                         "Change grip", "Grip (0 - 100)");
-                }}
-            ));
+                }}));
         }
 
         static void ApplyGrip(PhysicalBehaviour pb, float value)
         {
             if (pb == null) return;
-
             var colliders = pb.GetComponents<Collider2D>();
             if (colliders == null || colliders.Length == 0) return;
 
-            float friction;
-            if (value >= 100f)
-                friction = float.MaxValue;
-            else
-                friction = (value / 70f) * 2f;
-
+            float friction = value >= 100f ? 100f : (value / 70f) * 2f;
             var mat = new PhysicsMaterial2D("WheelGrip_Custom");
             mat.friction = friction;
             mat.bounciness = 0f;
@@ -783,10 +878,7 @@ namespace PPGMod
     }
 
     // ================= МОЩНОСТЬ РОТОРА =================
-    public class RotorPowerMarker : MonoBehaviour
-    {
-        public float Power = 10f;
-    }
+    public class RotorPowerMarker : MonoBehaviour { public float Power = 10f; }
 
     [HarmonyPatch(typeof(RotorBehaviour), "Start")]
     public static class RotorPowerMenuPatch
@@ -805,14 +897,10 @@ namespace PPGMod
                 if (buttons[i].Identity == "rotorSetPower") return;
 
             var button = new ContextMenuButton(
-                "rotorSetPower",
-                "Set rotor power",
+                "rotorSetPower", "Set rotor power",
                 "Set rotor power (1 = weak, 100 = very strong). Default 10.",
                 new UnityAction[] { delegate () { OpenPowerDialog(__instance); } }
-            )
-            {
-                LabelWhenMultipleAreSelected = "Set rotor power"
-            };
+            ) { LabelWhenMultipleAreSelected = "Set rotor power" };
             buttons.Add(button);
         }
 
@@ -841,13 +929,15 @@ namespace PPGMod
         [HarmonyPrefix]
         static bool Prefix(RotorBehaviour __instance)
         {
-            if (__instance == null || __instance.Hinge == null) return true;
+            if (__instance == null) return true;
+            var dynamo = __instance.GetComponent<RotorDynamoMarker>();
+            if (dynamo != null && dynamo.IsDynamo) return true;
+            if (__instance.Hinge == null) return true;
             if (__instance.PhysicalBehaviour == null) return true;
 
             float powerMul = 1f;
             var marker = __instance.GetComponent<RotorPowerMarker>();
-            if (marker != null)
-                powerMul = Mathf.Clamp(marker.Power / 10f, 0.1f, 10f);
+            if (marker != null) powerMul = Mathf.Clamp(marker.Power / 10f, 0.1f, 10f);
 
             JointMotor2D motor = __instance.Hinge.motor;
             motor.maxMotorTorque = (100f + __instance.PhysicalBehaviour.Charge * 4f) * powerMul;
@@ -866,6 +956,189 @@ namespace PPGMod
         {
             if (__instance == null) return false;
             __instance.Speed = v;
+            return false;
+        }
+    }
+
+    // ================= ROTOR DYNAMO MODE =================
+    public class RotorDynamoMarker : MonoBehaviour
+    {
+        public bool IsDynamo = false;
+        public bool Reversed = false;
+        public float MaxAV = 0f;
+        public float MotorForce = 15f;
+        public float MotorEfficiency = 1.5f;
+    }
+
+    [HarmonyPatch(typeof(RotorBehaviour), "Start")]
+    public static class RotorDynamoMenuPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(RotorBehaviour __instance)
+        {
+            if (__instance == null) return;
+            var pb = __instance.PhysicalBehaviour;
+            if (pb == null || pb.ContextMenuOptions == null) return;
+
+            var buttons = pb.ContextMenuOptions.Buttons;
+            if (buttons == null) return;
+
+            for (int i = 0; i < buttons.Count; i++)
+                if (buttons[i].Identity == "rotorMode") return;
+
+            var marker = __instance.GetComponent<RotorDynamoMarker>();
+            if (marker == null) marker = __instance.gameObject.AddComponent<RotorDynamoMarker>();
+
+            buttons.Add(new ContextMenuButton(
+                "rotorMode",
+                () => marker.IsDynamo ? "Switch mode: Rotor" : "Switch mode: Dynamo",
+                "Dynamo mode: rotor spins from electrical charge, like a motor.",
+                new UnityAction[] { delegate () {
+                    marker.IsDynamo = !marker.IsDynamo;
+                    UpdateDynamoButtons(pb, marker);
+                }}
+            ));
+
+            UpdateDynamoButtons(pb, marker);
+        }
+
+        static void UpdateDynamoButtons(PhysicalBehaviour pb, RotorDynamoMarker marker)
+        {
+            var buttons = pb.ContextMenuOptions.Buttons;
+            
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "rotorMaxAV" || buttons[i].Identity == "rotorReverse")
+                    buttons.RemoveAt(i);
+
+            if (marker.IsDynamo)
+            {
+                buttons.Add(new ContextMenuButton(
+                    "rotorMaxAV",
+                    "Set max AV",
+                    "Maximum angular velocity from motor. 0 = unlimited",
+                    new UnityAction[] { delegate ()
+                    {
+                        Utils.OpenFloatInputDialog<RotorDynamoMarker>(
+                            marker.MaxAV, marker,
+                            (RotorDynamoMarker m, float v) => m.MaxAV = Mathf.Max(0f, v),
+                            "Set max AV", "Max angular velocity (0 = unlimited)");
+                    }}
+                ));
+
+                buttons.Add(new ContextMenuButton(
+                    "rotorReverse",
+                    "Reverse direction",
+                    "Reverse the direction of the dynamo motor",
+                    new UnityAction[] { delegate () { marker.Reversed = !marker.Reversed; } }
+                ));
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(RotorBehaviour), "FixedUpdate")]
+    public static class RotorDynamoPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(RotorBehaviour __instance)
+        {
+            if (__instance == null) return true;
+            var marker = __instance.GetComponent<RotorDynamoMarker>();
+            if (marker == null || !marker.IsDynamo) return true;
+
+            var pb = __instance.PhysicalBehaviour;
+            if (pb == null || pb.rigidbody == null) return true;
+            var hinge = __instance.Hinge;
+            if (hinge == null || hinge.connectedBody == null) return true;
+
+            hinge.useMotor = false;
+            var wheelRb = hinge.connectedBody;
+
+            // Заряд не тратится. Если заряд 0 — мотор не крутит.
+            if (pb.Charge <= 0.01f) return false;
+
+            float torque = pb.Charge * marker.MotorForce * marker.MotorEfficiency;
+            float sign = marker.Reversed ? -1f : 1f;
+            torque *= sign;
+
+            if (marker.MaxAV > 0.01f)
+            {
+                float currentAV = wheelRb.angularVelocity;
+                if (currentAV * sign >= marker.MaxAV) return false;
+                torque = Mathf.Min(torque, marker.MaxAV - Mathf.Abs(currentAV));
+                if (marker.Reversed) torque = -torque;
+            }
+
+            wheelRb.AddTorque(torque);
+            return false;
+        }
+    }
+
+    // ================= SERVO → GENERATOR MODE =================
+    public class ServoModeMarker : MonoBehaviour
+    {
+        public bool IsGenerator = false;
+        public float FrictionMult = 0.1f;
+        public float PowerMult = 0.05f;
+        public float MinSpeed = 360f;
+    }
+
+    [HarmonyPatch(typeof(MotorisedHingeBehaviour), "Start")]
+    public static class ServoGeneratorMenuPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(MotorisedHingeBehaviour __instance)
+        {
+            if (__instance == null) return;
+            var pb = __instance.PhysicalBehaviour;
+            if (pb == null || pb.ContextMenuOptions == null) return;
+
+            var buttons = pb.ContextMenuOptions.Buttons;
+            if (buttons == null) return;
+
+            for (int i = 0; i < buttons.Count; i++)
+                if (buttons[i].Identity == "servoMode") return;
+
+            var marker = __instance.GetComponent<ServoModeMarker>();
+            if (marker == null) marker = __instance.gameObject.AddComponent<ServoModeMarker>();
+
+            buttons.Add(new ContextMenuButton(
+                "servoMode",
+                () => marker.IsGenerator ? "Switch mode: Servo" : "Switch mode: Generator",
+                "Generator mode: servo spins freely but slows down with speed, generating electricity.",
+                new UnityAction[] { delegate () { marker.IsGenerator = !marker.IsGenerator; } }
+            ));
+        }
+    }
+
+    [HarmonyPatch(typeof(MotorisedHingeBehaviour), "FixedUpdate")]
+    public static class ServoGeneratorPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(MotorisedHingeBehaviour __instance)
+        {
+            if (__instance == null) return true;
+            var marker = __instance.GetComponent<ServoModeMarker>();
+            if (marker == null || !marker.IsGenerator) return true;
+
+            var pb = __instance.PhysicalBehaviour;
+            if (pb == null) return true;
+            var hinge = __instance.Hinge;
+            if (hinge == null) return true;
+
+            hinge.useMotor = false;
+            var wheelRb = hinge.connectedBody;
+            if (wheelRb == null) return false;
+
+            float angVel = wheelRb.angularVelocity;
+            float angVelAbs = Mathf.Abs(angVel);
+
+            if (angVelAbs > marker.MinSpeed)
+            {
+                float chargeVal = (angVelAbs / 360f) * marker.PowerMult * wheelRb.mass;
+                pb.Charge = Mathf.Min(pb.Charge + chargeVal, 1000f);
+                wheelRb.AddTorque(-angVel * marker.FrictionMult);
+            }
+
             return false;
         }
     }
@@ -891,23 +1164,18 @@ namespace PPGMod
             float dist = dir.magnitude;
             if (dist < 0.01f) return true;
 
-            int mask = LayerMask.GetMask("Objects", "Bounds");
+            int mask = LayerMask.GetMask("Objects");
             if (mask == 0) return true;
 
             var hit = Physics2D.Raycast(origin, dir.normalized, dist, mask);
-            if (hit.collider != null && hit.collider != collider)
-                return false;
-
+            if (hit.collider != null && hit.collider != collider) return false;
             return true;
         }
     }
 #pragma warning restore 0612
 
     // ================= ВЕС ОБЪЕКТА =================
-    public class WeightMarker : MonoBehaviour
-    {
-        public float Value = -1f;
-    }
+    public class WeightMarker : MonoBehaviour { public float Value = -1f; }
 
     [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
     public static class ObjectPropertiesMenuPatch
@@ -917,7 +1185,6 @@ namespace PPGMod
         {
             if (__instance == null || __instance.ContextMenuOptions == null) return;
 
-            // Восстанавливаем сохранённый вес
             var marker = __instance.GetComponent<WeightMarker>();
             if (marker != null && marker.Value > 0f)
             {
@@ -933,32 +1200,26 @@ namespace PPGMod
                 if (buttons[i].Identity == "setWeight") return;
 
             buttons.Add(new ContextMenuButton(
-                "setWeight",
-                "Set Weight",
-                "Set object weight in kilograms (1000 = 1 ton)",
+                "setWeight", "Set Weight", "Set object weight in kilograms (1000 = 1 ton)",
                 new UnityAction[] { delegate ()
                 {
                     if (__instance.rigidbody == null) return;
-                    float currentKg = __instance.rigidbody.mass * 1000f;
+                    float currentKg = __instance.rigidbody.mass * 25f;
 
                     Utils.OpenFloatInputDialog<PhysicalBehaviour>(
-                        currentKg,
-                        __instance,
+                        currentKg, __instance,
                         (PhysicalBehaviour pb, float v) =>
                         {
                             if (pb == null || pb.rigidbody == null) return;
-                            float mass = Mathf.Max(0.00001f, v / 1000f);
+                            float mass = Mathf.Max(0.00001f, v / 25f);
                             pb.rigidbody.mass = mass;
                             pb.TrueInitialMass = mass;
                             pb.InitialMass = mass;
-
                             var m = pb.GetComponent<WeightMarker>();
                             if (m == null) m = pb.gameObject.AddComponent<WeightMarker>();
                             m.Value = mass;
                         },
-                        "Set Weight",
-                        "Weight (kg)"
-                    );
+                        "Set Weight", "Weight (kg)");
                 }}));
         }
     }
@@ -978,26 +1239,20 @@ namespace PPGMod
                 if (buttons[i].Identity == "flipLR") return;
 
             buttons.Add(new ContextMenuButton(
-                "flipLR",
-                "Flip left/right",
-                "Mirror this object horizontally",
+                "flipLR", "Flip left/right", "Mirror this object horizontally",
                 new UnityAction[] { delegate () {
                     var s = __instance.transform.localScale;
                     s.x *= -1f;
                     __instance.transform.localScale = s;
-                }}
-            ));
+                }}));
 
             buttons.Add(new ContextMenuButton(
-                "flipUD",
-                "Flip up/down",
-                "Mirror this object vertically",
+                "flipUD", "Flip up/down", "Mirror this object vertically",
                 new UnityAction[] { delegate () {
                     var s = __instance.transform.localScale;
                     s.y *= -1f;
                     __instance.transform.localScale = s;
-                }}
-            ));
+                }}));
         }
     }
 
@@ -1013,13 +1268,8 @@ namespace PPGMod
         static bool Prefix(AudioClip clip, float volume)
         {
             uint f = (uint)Time.frameCount;
-            if (f != frameCounter)
-            {
-                frameCounter = f;
-                clipsThisFrame = 0;
-            }
-            if (clipsThisFrame >= MaxClipsPerFrame)
-                return false;
+            if (f != frameCounter) { frameCounter = f; clipsThisFrame = 0; }
+            if (clipsThisFrame >= MaxClipsPerFrame) return false;
             clipsThisFrame++;
             return true;
         }
@@ -1037,24 +1287,77 @@ namespace PPGMod
             var buttons = __instance.PhysicalBehaviour.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "setDetectorRange") buttons.RemoveAt(i);
+
             for (int i = 0; i < buttons.Count; i++)
                 if (buttons[i].Identity == "setDetectorRangeCustom") return;
 
             buttons.Add(new ContextMenuButton(
-                "setDetectorRangeCustom",
-                "Set range (custom)",
-                "Set detector range from 0.05 to 10 meters",
+                "setDetectorRangeCustom", "Set range", "Set detector range from 0.05 to 10 meters",
                 new UnityAction[] { delegate ()
                 {
                     Utils.OpenFloatInputDialog<DetectorBehaviour>(
                         __instance.Range, __instance,
-                        (DetectorBehaviour d, float v) =>
-                        {
-                            d.Range = Mathf.Clamp(v, 0.05f, 10f);
-                        },
+                        (DetectorBehaviour d, float v) => { d.Range = Mathf.Clamp(v, 0.05f, 10f); },
                         "Set detector range", "Range (0.05 - 10)");
-                }}
-            ));
+                }}));
+        }
+    }
+
+    // ================= AERO COOLING (охлаждение от полёта) =================
+    public class AeroCoolingMarker : MonoBehaviour
+    {
+        public float CoolingMultiplier = 1f;
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class AeroCoolingInitPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null) return;
+            if (__instance.GetComponent<AeroCoolingMarker>() != null) return;
+            __instance.gameObject.AddComponent<AeroCoolingMarker>();
+        }
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "ManagedFixedUpdate")]
+    public static class AeroCoolingPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null || __instance.rigidbody == null) return;
+            if (!__instance.SimulateTemperature) return;
+
+            var marker = __instance.GetComponent<AeroCoolingMarker>();
+            if (marker == null) return;
+
+            // Линейная + угловая скорость (с ограничением)
+            float linearSpeed = Mathf.Clamp(__instance.rigidbody.velocity.magnitude, 0f, 12000f);
+            float angularSpeed = Mathf.Clamp(Mathf.Abs(__instance.rigidbody.angularVelocity), 0f, 12000f);
+
+            if (linearSpeed < 0.5f && angularSpeed < 1f) return;
+
+            float ambient = PhysicalBehaviour.AmbientTemperature;
+            float diff = __instance.Temperature - ambient;
+            if (Mathf.Abs(diff) < 0.1f) return;
+
+            // Учитываем теплоёмкость (массу)
+            float heatCapacity = __instance.GetHeatCapacity();
+            if (heatCapacity <= 0f) heatCapacity = 1f;
+
+            // Формула с учётом массы:
+            // cooling = speedFactor * multiplier * dt / heatCapacity
+            float speedFactor = (linearSpeed + angularSpeed) * 0.00137f;
+            float cooling = speedFactor * marker.CoolingMultiplier * Time.fixedDeltaTime / heatCapacity;
+
+            if (diff > 0)
+                __instance.Temperature = Mathf.Max(ambient, __instance.Temperature - cooling);
+            else
+                __instance.Temperature = Mathf.Min(ambient, __instance.Temperature + cooling);
         }
     }
 
@@ -1076,57 +1379,42 @@ namespace PPGMod
         private void Start()
         {
             phys = GetComponent<PhysicalBehaviour>();
-            if (phys != null)
-            {
-                _originalDelay = phys.ActivationPropagationDelay;
-                phys.ActivationPropagationDelay = 0;
-            }
+            if (phys != null) { _originalDelay = phys.ActivationPropagationDelay; phys.ActivationPropagationDelay = 0; }
 
-            // Re-find PointerBehaviour при загрузке (ссылки не сохраняются)
             var pointer = GetComponent<PointerBehaviour>();
             if (pointer != null) Wheel = pointer.RotorWheel;
 
             var lightT = transform.Find("Active light");
             if (lightT != null) Light = lightT.GetComponent<SpriteRenderer>();
 
-            if (Wheel != null)
-                currentDegree = Wheel.eulerAngles.z + 90f;
+            if (Wheel != null) currentDegree = Wheel.eulerAngles.z + 90f;
 
             if (phys != null && phys.ContextMenuOptions != null)
             {
                 var buttons = phys.ContextMenuOptions.Buttons;
-
                 for (int i = buttons.Count - 1; i >= 0; i--)
                     if (buttons[i].Identity == "setCamAngleCaF" || buttons[i].Identity == "switchTriggerModeCaF")
                         buttons.RemoveAt(i);
 
                 buttons.Add(new ContextMenuButton(
-                    "setCamAngleCaF",
-                    "Set angle CaF",
-                    "Set the angle at which the signal is triggered",
+                    "setCamAngleCaF", "Set angle CaF", "Set the angle at which the signal is triggered",
                     new UnityAction[] { delegate ()
                     {
                         Utils.OpenFloatInputDialog<PointerCamFollowerBehaviour>(
                             TargetAngle, this,
                             (PointerCamFollowerBehaviour b, float v) => b.TargetAngle = v,
                             "Set angle CaF", "Angle");
-                    }}
-                ));
+                    }}));
 
                 buttons.Add(new ContextMenuButton(
                     "switchTriggerModeCaF",
                     () => DoubleTrigger ? "Switch trigger: Single trigger" : "Switch trigger: Double trigger",
                     "Single = one signal on reach. Double = signal on reach and on release.",
-                    new UnityAction[] { delegate () { DoubleTrigger = !DoubleTrigger; } }
-                ));
+                    new UnityAction[] { delegate () { DoubleTrigger = !DoubleTrigger; } }));
             }
         }
 
-        private void OnDestroy()
-        {
-            if (phys != null)
-                phys.ActivationPropagationDelay = _originalDelay;
-        }
+        private void OnDestroy() { if (phys != null) phys.ActivationPropagationDelay = _originalDelay; }
 
         private void FixedUpdate()
         {
@@ -1138,9 +1426,7 @@ namespace PPGMod
             float rpm = Mathf.Abs(AVtoRPM(Wheel));
             bool fastSpin = rpm > 80f;
 
-            bool nowReached = fastSpin
-                ? AnglePassed(lastDegree, currentDegree, TargetAngle)
-                : Reached;
+            bool nowReached = fastSpin ? AnglePassed(lastDegree, currentDegree, TargetAngle) : Reached;
 
             if (!done && nowReached)
             {
@@ -1174,8 +1460,7 @@ namespace PPGMod
             target = NormalizeAngle(transform.eulerAngles.z + target);
             float delta = Mathf.DeltaAngle(from, to);
             float deltaTarget = Mathf.DeltaAngle(from, target);
-            return Mathf.Sign(delta) == Mathf.Sign(deltaTarget)
-                && Mathf.Abs(deltaTarget) <= Mathf.Abs(delta);
+            return Mathf.Sign(delta) == Mathf.Sign(deltaTarget) && Mathf.Abs(deltaTarget) <= Mathf.Abs(delta);
         }
 
         private static float NormalizeAngle(float angle)
@@ -1214,17 +1499,11 @@ namespace PPGMod
             s.Pointer = p;
         }
 
-        private void Start()
-        {
-            // Re-find PointerBehaviour при загрузке (ссылки не сохраняются)
-            if (Pointer == null) Pointer = GetComponent<PointerBehaviour>();
-            UpdateButton();
-        }
+        private void Start() { if (Pointer == null) Pointer = GetComponent<PointerBehaviour>(); UpdateButton(); }
 
         public void Toggle()
         {
             IsCamFollower = !IsCamFollower;
-
             if (IsCamFollower)
             {
                 if (Pointer != null) Pointer.enabled = false;
@@ -1234,12 +1513,10 @@ namespace PPGMod
             else
             {
                 if (Pointer != null) Pointer.enabled = true;
-
                 var caf = gameObject.GetComponent<PointerCamFollowerBehaviour>();
                 if (caf != null)
                 {
-                    if (Pointer != null && Pointer.PhysicalBehaviour != null &&
-                        Pointer.PhysicalBehaviour.ContextMenuOptions != null)
+                    if (Pointer != null && Pointer.PhysicalBehaviour != null && Pointer.PhysicalBehaviour.ContextMenuOptions != null)
                     {
                         var btns = Pointer.PhysicalBehaviour.ContextMenuOptions.Buttons;
                         for (int i = btns.Count - 1; i >= 0; i--)
@@ -1254,21 +1531,18 @@ namespace PPGMod
 
         private void UpdateButton()
         {
-            if (Pointer == null || Pointer.PhysicalBehaviour == null ||
-                Pointer.PhysicalBehaviour.ContextMenuOptions == null) return;
+            if (Pointer == null || Pointer.PhysicalBehaviour == null || Pointer.PhysicalBehaviour.ContextMenuOptions == null) return;
             var buttons = Pointer.PhysicalBehaviour.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
             for (int i = buttons.Count - 1; i >= 0; i--)
-                if (buttons[i].Identity == "pointerSwitchMode")
-                    buttons.RemoveAt(i);
+                if (buttons[i].Identity == "pointerSwitchMode") buttons.RemoveAt(i);
 
             buttons.Add(new ContextMenuButton(
                 "pointerSwitchMode",
                 IsCamFollower ? "Switch mode: Pointer" : "Switch mode: Cam Follower",
                 "Switch between Pointer and Cam Follower mode",
-                new UnityAction[] { delegate () { Toggle(); } }
-            ));
+                new UnityAction[] { delegate () { Toggle(); } }));
         }
     }
 
@@ -1276,10 +1550,7 @@ namespace PPGMod
     public static class PointerModePatch
     {
         [HarmonyPostfix]
-        static void Postfix(PointerBehaviour __instance)
-        {
-            PointerModeSwitcher.AddTo(__instance.gameObject);
-        }
+        static void Postfix(PointerBehaviour __instance) { PointerModeSwitcher.AddTo(__instance.gameObject); }
     }
 
     // ================= PISTON → SPRING MODE =================
@@ -1290,7 +1561,6 @@ namespace PPGMod
         public SliderJoint2D Slider;
         public Rigidbody2D HeadRb;
         public Transform PistonHead;
-
         public float SpringFrequency = 0f;
         public float SpringDamping = 0.5f;
         public SpringDirection Direction = SpringDirection.Inner;
@@ -1323,16 +1593,12 @@ namespace PPGMod
             if (pb != null && pb.ContextMenuOptions != null)
             {
                 var buttons = pb.ContextMenuOptions.Buttons;
-
                 for (int i = buttons.Count - 1; i >= 0; i--)
-                    if (buttons[i].Identity == "setSpringFrequency" ||
-                        buttons[i].Identity == "switchSpringDirection")
+                    if (buttons[i].Identity == "setSpringFrequency" || buttons[i].Identity == "switchSpringDirection")
                         buttons.RemoveAt(i);
 
                 buttons.Add(new ContextMenuButton(
-                    "setSpringFrequency",
-                    "Set Spring Power",
-                    "0 = free movement, higher = stronger spring",
+                    "setSpringFrequency", "Set Spring Power", "0 = free movement, higher = stronger spring",
                     new UnityAction[] { delegate ()
                     {
                         Utils.OpenFloatInputDialog<PistonSpringBehaviour>(
@@ -1340,23 +1606,18 @@ namespace PPGMod
                             (PistonSpringBehaviour b, float v) =>
                             {
                                 b.SpringFrequency = Mathf.Max(0f, v);
-                                if (b._spring != null)
-                                    b._spring.frequency = Mathf.Max(0.01f, b.SpringFrequency);
-                                else if (b.SpringFrequency > 0f)
-                                    b.CreateSpring();
+                                if (b._spring != null) b._spring.frequency = Mathf.Max(0.01f, b.SpringFrequency);
+                                else if (b.SpringFrequency > 0f) b.CreateSpring();
                             },
                             "Set Spring Power", "Frequency");
-                    }}
-                ));
+                    }}));
 
                 buttons.Add(new ContextMenuButton(
                     "switchSpringDirection",
                     () => Direction == SpringDirection.Inner ? "Switch spring: Middle" :
-                          Direction == SpringDirection.Middle ? "Switch spring: Outer" :
-                          "Switch spring: Inner",
+                          Direction == SpringDirection.Middle ? "Switch spring: Outer" : "Switch spring: Inner",
                     "Cycle spring direction: Inner, Middle, Outer",
-                    new UnityAction[] { delegate () { CycleDirection(); } }
-                ));
+                    new UnityAction[] { delegate () { CycleDirection(); } }));
             }
 
             if (SpringFrequency > 0f) CreateSpring();
@@ -1365,8 +1626,7 @@ namespace PPGMod
         private void CycleDirection()
         {
             Direction = Direction == SpringDirection.Inner ? SpringDirection.Middle :
-                        Direction == SpringDirection.Middle ? SpringDirection.Outer :
-                        SpringDirection.Inner;
+                        Direction == SpringDirection.Middle ? SpringDirection.Outer : SpringDirection.Inner;
         }
 
         private void Update()
@@ -1413,22 +1673,13 @@ namespace PPGMod
 
             switch (Direction)
             {
-                case SpringDirection.Inner:
-                    _spring.distance = Mathf.Min(minL, maxL);
-                    break;
-                case SpringDirection.Middle:
-                    _spring.distance = (minL + maxL) / 2f;
-                    break;
-                case SpringDirection.Outer:
-                    _spring.distance = Mathf.Max(minL, maxL);
-                    break;
+                case SpringDirection.Inner: _spring.distance = Mathf.Min(minL, maxL); break;
+                case SpringDirection.Middle: _spring.distance = (minL + maxL) / 2f; break;
+                case SpringDirection.Outer: _spring.distance = Mathf.Max(minL, maxL); break;
             }
         }
 
-        private void OnDestroy()
-        {
-            if (_spring != null) Destroy(_spring);
-        }
+        private void OnDestroy() { if (_spring != null) Destroy(_spring); }
     }
 
     public class PistonModeSwitcher : MonoBehaviour
@@ -1445,17 +1696,11 @@ namespace PPGMod
             s.Piston = p;
         }
 
-        private void Start()
-        {
-            // Re-find PistonBehaviour при загрузке (ссылки не сохраняются)
-            if (Piston == null) Piston = GetComponent<PistonBehaviour>();
-            UpdateButton();
-        }
+        private void Start() { if (Piston == null) Piston = GetComponent<PistonBehaviour>(); UpdateButton(); }
 
         public void Toggle()
         {
             IsSpringMode = !IsSpringMode;
-
             if (IsSpringMode)
             {
                 if (Piston != null) Piston.enabled = false;
@@ -1465,12 +1710,10 @@ namespace PPGMod
             else
             {
                 if (Piston != null) Piston.enabled = true;
-
                 var spring = gameObject.GetComponent<PistonSpringBehaviour>();
                 if (spring != null)
                 {
-                    if (Piston != null && Piston.PhysicalBehaviour != null &&
-                        Piston.PhysicalBehaviour.ContextMenuOptions != null)
+                    if (Piston != null && Piston.PhysicalBehaviour != null && Piston.PhysicalBehaviour.ContextMenuOptions != null)
                     {
                         var btns = Piston.PhysicalBehaviour.ContextMenuOptions.Buttons;
                         for (int i = btns.Count - 1; i >= 0; i--)
@@ -1485,21 +1728,18 @@ namespace PPGMod
 
         private void UpdateButton()
         {
-            if (Piston == null || Piston.PhysicalBehaviour == null ||
-                Piston.PhysicalBehaviour.ContextMenuOptions == null) return;
+            if (Piston == null || Piston.PhysicalBehaviour == null || Piston.PhysicalBehaviour.ContextMenuOptions == null) return;
             var buttons = Piston.PhysicalBehaviour.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
             for (int i = buttons.Count - 1; i >= 0; i--)
-                if (buttons[i].Identity == "pistonSwitchMode")
-                    buttons.RemoveAt(i);
+                if (buttons[i].Identity == "pistonSwitchMode") buttons.RemoveAt(i);
 
             buttons.Add(new ContextMenuButton(
                 "pistonSwitchMode",
                 IsSpringMode ? "Switch mode: Piston" : "Switch mode: Spring",
                 "Switch between Piston and Spring mode",
-                new UnityAction[] { delegate () { Toggle(); } }
-            ));
+                new UnityAction[] { delegate () { Toggle(); } }));
         }
     }
 
@@ -1507,9 +1747,6 @@ namespace PPGMod
     public static class PistonModePatch
     {
         [HarmonyPostfix]
-        static void Postfix(PistonBehaviour __instance)
-        {
-            PistonModeSwitcher.AddTo(__instance.gameObject);
-        }
+        static void Postfix(PistonBehaviour __instance) { PistonModeSwitcher.AddTo(__instance.gameObject); }
     }
 }
