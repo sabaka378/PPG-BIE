@@ -20,7 +20,7 @@ namespace PPGMod
     }
 
     // ================= ПЛАГИН =================
-    [BepInPlugin("com.sabaka.ppgmod", "PPG Mod", "1.15")]
+    [BepInPlugin("com.sabaka.ppgmod", "PPG Mod", "1.15.1")]
     public class Plugin : BaseUnityPlugin
     {
         public const float MaxRotationSpeed = 25000f;
@@ -49,6 +49,7 @@ namespace PPGMod
         {
             KeyState.K_enable = Input.GetKey(KeyCode.K);
             KeyState.L_enable = Input.GetKey(KeyCode.L);
+            KeyState.P_enable = Input.GetKey(KeyCode.P);
         }
     }
 
@@ -88,26 +89,25 @@ namespace PPGMod
             var invisibleMarker = __instance.GetComponent<InvisibleWireMarker>();
             var fastMarker = __instance.GetComponent<FastWireMarker>();
 
-            if (!KeyState.K_enable)
+            if (invisibleMarker != null && invisibleMarker.IsInvisible)
             {
-                if (invisibleMarker != null)
-                {
-                    UnityEngine.Object.Destroy(invisibleMarker);
-                    invisibleMarker = null;
-                }
+                if (lr != null) lr.enabled = false;
+            }
+            else if (KeyState.K_enable)
+            {
+                if (invisibleMarker == null)
+                    invisibleMarker = __instance.gameObject.AddComponent<InvisibleWireMarker>();
+                invisibleMarker.IsInvisible = true;
+                if (lr != null) lr.enabled = false;
+            }
+            else
+            {
                 if (lr != null)
                 {
                     lr.enabled = true;
                     lr.startColor = Color.white;
                     lr.endColor = Color.white;
                 }
-            }
-            else
-            {
-                if (invisibleMarker == null)
-                    invisibleMarker = __instance.gameObject.AddComponent<InvisibleWireMarker>();
-                invisibleMarker.IsInvisible = true;
-                if (lr != null) lr.enabled = false;
             }
 
             if (KeyState.L_enable && fastMarker == null)
@@ -125,49 +125,6 @@ namespace PPGMod
             {
                 if (__instance.physicalBehaviour != null)
                     __instance.physicalBehaviour.ActivationPropagationDelay = 0f;
-            }
-        }
-    }
-
-    // ================= МАРКЕР БЕСКОНЕЧНОГО ПРОВОДА =================
-    public class InfiniteWireMarker : MonoBehaviour { }
-
-    [HarmonyPatch(typeof(WireBehaviour), "Initialise")]
-    public static class InfiniteWirePatch
-    {
-        [HarmonyPostfix]
-        static void Postfix(WireBehaviour __instance)
-        {
-            if (__instance == null) return;
-
-            // P зажата при создании — провод бесконечный
-            if (!Input.GetKey(KeyCode.P)) return;
-
-            // Пропускаем ТОЛЬКО фиксирующие и жёсткие провода
-            string typeName = __instance.GetType().Name;
-            if (typeName.Contains("Fixed") || typeName.Contains("Rigid") ||
-                typeName.Contains("Chain") || typeName.Contains("Spring"))
-                return;
-
-            // Ставим маркер
-            if (__instance.GetComponent<InfiniteWireMarker>() == null)
-                __instance.gameObject.AddComponent<InfiniteWireMarker>();
-
-            // Ищем DistanceJoint2D
-            var distanceJoint = __instance.GetComponent<DistanceJoint2D>();
-            if (distanceJoint != null)
-            {
-                // КЛЮЧЕВОЙ ФИКС: maxDistanceOnly = true
-                // Провод становится "верёвкой": не мешает сближаться, но не даёт разойтись дальше distance
-                distanceJoint.maxDistanceOnly = true;
-
-                // Ставим огромную максимальную длину (не фиксированную!)
-                distanceJoint.distance = 999999f;
-                distanceJoint.autoConfigureDistance = false;
-
-                // Не даём проводу порваться от сил
-                distanceJoint.breakForce = float.MaxValue;
-                distanceJoint.breakTorque = float.MaxValue;
             }
         }
     }
@@ -204,6 +161,37 @@ namespace PPGMod
                 lr.enabled = false;
                 lr.startColor = marker.OriginalStart;
                 lr.endColor = marker.OriginalEnd;
+            }
+        }
+    }
+
+    // ================= БЕСКОНЕЧНЫЕ ПРОВОДА =================
+    public class InfiniteWireMarker : MonoBehaviour { }
+
+    [HarmonyPatch(typeof(WireBehaviour), "Initialise")]
+    public static class InfiniteWirePatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(WireBehaviour __instance)
+        {
+            if (__instance == null) return;
+            if (!KeyState.P_enable) return;
+
+            string typeName = __instance.GetType().Name;
+            if (typeName.Contains("Fixed") || typeName.Contains("Rigid") ||
+                typeName.Contains("Chain") || typeName.Contains("Spring"))
+                return;
+
+            if (__instance.GetComponent<InfiniteWireMarker>() == null)
+                __instance.gameObject.AddComponent<InfiniteWireMarker>();
+
+            // Просто ВЫКЛЮЧАЕМ физический джоинт, чтобы провод не тянул объекты
+            var distanceJoint = __instance.GetComponent<DistanceJoint2D>();
+            if (distanceJoint != null)
+            {
+                distanceJoint.enabled = false; // <-- ВОТ ГЛАВНЫЙ ФИКС
+                distanceJoint.breakForce = float.MaxValue;
+                distanceJoint.breakTorque = float.MaxValue;
             }
         }
     }
@@ -417,12 +405,14 @@ namespace PPGMod
             var marker = pd.GetComponent<PulseDrumModeMarker>();
             if (marker == null) marker = pd.gameObject.AddComponent<PulseDrumModeMarker>();
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "pulseDrumMode",
                 () => marker.ExplodeMode ? "Switch mode: Vanilla" : "Switch mode: Explode",
                 "Switch between vanilla pulse and explosive mode",
                 new UnityAction[] { delegate () { marker.ExplodeMode = !marker.ExplodeMode; } }
-            ));
+            );
+            btn.LabelWhenMultipleAreSelected = "Switch mode";
+            buttons.Add(btn);
         }
     }
 
@@ -828,7 +818,7 @@ namespace PPGMod
         static void Postfix(PhysicalBehaviour __instance)
         {
             if (__instance == null || __instance.ContextMenuOptions == null) return;
-            if (__instance.gameObject.name != "Wheel") return;
+            if (!__instance.gameObject.name.ToLower().Contains("wheel")) return;
 
             var buttons = __instance.ContextMenuOptions.Buttons;
             if (buttons == null) return;
@@ -841,7 +831,7 @@ namespace PPGMod
             for (int i = 0; i < buttons.Count; i++)
                 if (buttons[i].Identity == "changeGrip") return;
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "changeGrip", "Change grip", "Set wheel grip. 70 = vanilla, 100 = maximum (no sliding)",
                 new UnityAction[] { delegate ()
                 {
@@ -855,7 +845,9 @@ namespace PPGMod
                             ApplyGrip(__instance, mk.GripValue);
                         },
                         "Change grip", "Grip (0 - 100)");
-                }}));
+                }});
+            btn.LabelWhenMultipleAreSelected = "Change grip";
+            buttons.Add(btn);
         }
 
         static void ApplyGrip(PhysicalBehaviour pb, float value)
@@ -924,31 +916,6 @@ namespace PPGMod
         }
     }
 
-    [HarmonyPatch(typeof(RotorBehaviour), "FixedUpdate")]
-    public static class RotorPowerFixedUpdatePatch
-    {
-        [HarmonyPrefix]
-        static bool Prefix(RotorBehaviour __instance)
-        {
-            if (__instance == null) return true;
-            var dynamo = __instance.GetComponent<RotorDynamoMarker>();
-            if (dynamo != null && dynamo.IsDynamo) return true;
-            if (__instance.Hinge == null) return true;
-            if (__instance.PhysicalBehaviour == null) return true;
-
-            float powerMul = 1f;
-            var marker = __instance.GetComponent<RotorPowerMarker>();
-            if (marker != null) powerMul = Mathf.Clamp(marker.Power / 10f, 0.1f, 10f);
-
-            JointMotor2D motor = __instance.Hinge.motor;
-            motor.maxMotorTorque = (100f + __instance.PhysicalBehaviour.Charge * 4f) * powerMul;
-            motor.motorSpeed = (__instance.Activated ? -__instance.GetScaledSpeed() : 0f);
-            __instance.Hinge.motor = motor;
-
-            return false;
-        }
-    }
-
     [HarmonyPatch(typeof(RotorBehaviour), "SetSpeed")]
     public static class RotorSpeedLimitPatch
     {
@@ -961,18 +928,25 @@ namespace PPGMod
         }
     }
 
-    // ================= ROTOR DYNAMO MODE =================
-    public class RotorDynamoMarker : MonoBehaviour
+    // ================= ROTOR MODES =================
+    public class RotorModeMarker : MonoBehaviour
     {
-        public bool IsDynamo = false;
+        public enum Mode { Rotor, Dynamo, Limiter }
+        public Mode CurrentMode = Mode.Rotor;
+
         public bool Reversed = false;
         public float MaxAV = 0f;
-        public float MotorForce = 15f;
-        public float MotorEfficiency = 1.5f;
+        public float MotorForce = 1f;
+        public float MotorEfficiency = 0.1f;
+
+        public float ThresholdAV = 500f;
+        public bool DoubleTrigger = false;
+        public bool SignalSent = false;
+        public float OriginalDelay = -1f;
     }
 
     [HarmonyPatch(typeof(RotorBehaviour), "Start")]
-    public static class RotorDynamoMenuPatch
+    public static class RotorModeMenuPatch
     {
         [HarmonyPostfix]
         static void Postfix(RotorBehaviour __instance)
@@ -984,54 +958,133 @@ namespace PPGMod
             var buttons = pb.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
-            for (int i = 0; i < buttons.Count; i++)
-                if (buttons[i].Identity == "rotorMode") return;
-
-            var marker = __instance.GetComponent<RotorDynamoMarker>();
-            if (marker == null) marker = __instance.gameObject.AddComponent<RotorDynamoMarker>();
-
-            buttons.Add(new ContextMenuButton(
-                "rotorMode",
-                () => marker.IsDynamo ? "Switch mode: Rotor" : "Switch mode: Dynamo",
-                "Dynamo mode: rotor spins from electrical charge, like a motor.",
-                new UnityAction[] { delegate () {
-                    marker.IsDynamo = !marker.IsDynamo;
-                    UpdateDynamoButtons(pb, marker);
-                }}
-            ));
-
-            UpdateDynamoButtons(pb, marker);
-        }
-
-        static void UpdateDynamoButtons(PhysicalBehaviour pb, RotorDynamoMarker marker)
-        {
-            var buttons = pb.ContextMenuOptions.Buttons;
-            
             for (int i = buttons.Count - 1; i >= 0; i--)
-                if (buttons[i].Identity == "rotorMaxAV" || buttons[i].Identity == "rotorReverse")
+                if (buttons[i].Identity == "rotorMode" ||
+                    buttons[i].Identity == "rotorMaxAV" ||
+                    buttons[i].Identity == "rotorReverse" ||
+                    buttons[i].Identity == "rotorLimiterThreshold" ||
+                    buttons[i].Identity == "rotorLimiterTrigger")
                     buttons.RemoveAt(i);
 
-            if (marker.IsDynamo)
+            var marker = __instance.GetComponent<RotorModeMarker>();
+            if (marker == null) marker = __instance.gameObject.AddComponent<RotorModeMarker>();
+
+            var btnMode = new ContextMenuButton(
+                "rotorMode",
+                () =>
+                {
+                    switch (marker.CurrentMode)
+                    {
+                        case RotorModeMarker.Mode.Rotor: return "Switch mode: Dynamo";
+                        case RotorModeMarker.Mode.Dynamo: return "Switch mode: Limiter";
+                        case RotorModeMarker.Mode.Limiter: return "Switch mode: Rotor";
+                        default: return "Switch mode";
+                    }
+                },
+                "Cycle rotor mode: Rotor → Dynamo → Limiter",
+                new UnityAction[] { delegate () { CycleMode(__instance, marker); } }
+            );
+            btnMode.LabelWhenMultipleAreSelected = "Switch mode";
+            buttons.Add(btnMode);
+
+            UpdateModeButtons(pb, marker);
+        }
+
+        static void CycleMode(RotorBehaviour rb, RotorModeMarker marker)
+        {
+            if (marker.CurrentMode == RotorModeMarker.Mode.Rotor)
+                marker.CurrentMode = RotorModeMarker.Mode.Dynamo;
+            else if (marker.CurrentMode == RotorModeMarker.Mode.Dynamo)
+                marker.CurrentMode = RotorModeMarker.Mode.Limiter;
+            else
+                marker.CurrentMode = RotorModeMarker.Mode.Rotor;
+
+            var pb = rb.PhysicalBehaviour;
+            if (pb != null)
             {
-                buttons.Add(new ContextMenuButton(
+                if (marker.CurrentMode == RotorModeMarker.Mode.Limiter)
+                {
+                    if (marker.OriginalDelay < 0f)
+                        marker.OriginalDelay = pb.ActivationPropagationDelay;
+                    pb.ActivationPropagationDelay = 0f;
+                }
+                else
+                {
+                    if (marker.OriginalDelay >= 0f)
+                        pb.ActivationPropagationDelay = marker.OriginalDelay;
+                }
+            }
+
+            UpdateModeButtons(pb, marker);
+        }
+
+        static void UpdateModeButtons(PhysicalBehaviour pb, RotorModeMarker marker)
+        {
+            if (pb == null || pb.ContextMenuOptions == null) return;
+            var buttons = pb.ContextMenuOptions.Buttons;
+
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "rotorMaxAV" ||
+                    buttons[i].Identity == "rotorReverse" ||
+                    buttons[i].Identity == "rotorLimiterThreshold" ||
+                    buttons[i].Identity == "rotorLimiterTrigger")
+                    buttons.RemoveAt(i);
+
+            if (marker.CurrentMode == RotorModeMarker.Mode.Dynamo)
+            {
+                var btnMax = new ContextMenuButton(
                     "rotorMaxAV",
                     "Set max AV",
-                    "Maximum angular velocity from motor. 0 = unlimited",
+                    "Maximum angular velocity. Negative = reverse direction. 0 = unlimited.",
                     new UnityAction[] { delegate ()
                     {
-                        Utils.OpenFloatInputDialog<RotorDynamoMarker>(
+                        Utils.OpenFloatInputDialog<RotorModeMarker>(
                             marker.MaxAV, marker,
-                            (RotorDynamoMarker m, float v) => m.MaxAV = Mathf.Max(0f, v),
-                            "Set max AV", "Max angular velocity (0 = unlimited)");
+                            (RotorModeMarker m, float v) =>
+                            {
+                                if (v < 0) { m.Reversed = true; m.MaxAV = Mathf.Abs(v); }
+                                else { m.Reversed = false; m.MaxAV = v; }
+                            },
+                            "Set max AV", "Max AV (negative = reverse)");
                     }}
-                ));
+                );
+                btnMax.LabelWhenMultipleAreSelected = "Set max AV";
+                buttons.Add(btnMax);
 
-                buttons.Add(new ContextMenuButton(
+                var btnRev = new ContextMenuButton(
                     "rotorReverse",
                     "Reverse direction",
                     "Reverse the direction of the dynamo motor",
                     new UnityAction[] { delegate () { marker.Reversed = !marker.Reversed; } }
-                ));
+                );
+                btnRev.LabelWhenMultipleAreSelected = "Reverse direction";
+                buttons.Add(btnRev);
+            }
+            else if (marker.CurrentMode == RotorModeMarker.Mode.Limiter)
+            {
+                var btnTh = new ContextMenuButton(
+                    "rotorLimiterThreshold",
+                    "Set threshold AV",
+                    "Set angular velocity threshold for signal (absolute value)",
+                    new UnityAction[] { delegate ()
+                    {
+                        Utils.OpenFloatInputDialog<RotorModeMarker>(
+                            marker.ThresholdAV, marker,
+                            (RotorModeMarker m, float v) => m.ThresholdAV = Mathf.Abs(v),
+                            "Set threshold AV", "Threshold (absolute AV)");
+                    }}
+                );
+                btnTh.LabelWhenMultipleAreSelected = "Set threshold AV";
+                buttons.Add(btnTh);
+
+                var btnTr = new ContextMenuButton(
+                    "rotorLimiterTrigger",
+                    () => marker.DoubleTrigger ? "Switch trigger: Single trigger" : "Switch trigger: Double trigger",
+                    "Single = one signal on reach. Double = signal on reach and on release.",
+                    new UnityAction[] { delegate () { marker.DoubleTrigger = !marker.DoubleTrigger; } }
+                );
+                btnTr.LabelWhenMultipleAreSelected = "Switch trigger";
+                buttons.Add(btnTr);
             }
         }
     }
@@ -1043,8 +1096,8 @@ namespace PPGMod
         static bool Prefix(RotorBehaviour __instance)
         {
             if (__instance == null) return true;
-            var marker = __instance.GetComponent<RotorDynamoMarker>();
-            if (marker == null || !marker.IsDynamo) return true;
+            var marker = __instance.GetComponent<RotorModeMarker>();
+            if (marker == null || marker.CurrentMode != RotorModeMarker.Mode.Dynamo) return true;
 
             var pb = __instance.PhysicalBehaviour;
             if (pb == null || pb.rigidbody == null) return true;
@@ -1054,22 +1107,90 @@ namespace PPGMod
             hinge.useMotor = false;
             var wheelRb = hinge.connectedBody;
 
-            // Заряд не тратится. Если заряд 0 — мотор не крутит.
             if (pb.Charge <= 0.01f) return false;
 
-            float torque = pb.Charge * marker.MotorForce * marker.MotorEfficiency;
             float sign = marker.Reversed ? -1f : 1f;
-            torque *= sign;
+            float currentAV = wheelRb.angularVelocity;
+            float currentAVSigned = currentAV * sign;
+
+            if (marker.MaxAV > 0.01f && currentAVSigned >= marker.MaxAV)
+                return false;
+
+            float torque = pb.Charge * marker.MotorForce * marker.MotorEfficiency;
 
             if (marker.MaxAV > 0.01f)
             {
-                float currentAV = wheelRb.angularVelocity;
-                if (currentAV * sign >= marker.MaxAV) return false;
-                torque = Mathf.Min(torque, marker.MaxAV - Mathf.Abs(currentAV));
-                if (marker.Reversed) torque = -torque;
+                float remaining = marker.MaxAV - currentAVSigned;
+                if (remaining <= 0f) return false;
+                torque = Mathf.Min(torque, remaining * wheelRb.mass * 10f);
             }
 
-            wheelRb.AddTorque(torque);
+            wheelRb.AddTorque(torque * sign);
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(RotorBehaviour), "FixedUpdate")]
+    public static class RotorLimiterPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(RotorBehaviour __instance)
+        {
+            if (__instance == null) return true;
+            var marker = __instance.GetComponent<RotorModeMarker>();
+            if (marker == null || marker.CurrentMode != RotorModeMarker.Mode.Limiter) return true;
+
+            var pb = __instance.PhysicalBehaviour;
+            if (pb == null || pb.rigidbody == null) return true;
+            var hinge = __instance.Hinge;
+            if (hinge == null || hinge.connectedBody == null) return true;
+
+            hinge.useMotor = false;
+
+            var wheelRb = hinge.connectedBody;
+            float absAV = Mathf.Abs(wheelRb.angularVelocity);
+
+            bool reached = absAV >= marker.ThresholdAV;
+
+            if (!marker.SignalSent && reached)
+            {
+                marker.SignalSent = true;
+                pb.ForceSendUse();
+            }
+            else if (marker.SignalSent && !reached)
+            {
+                if (marker.DoubleTrigger) pb.ForceSendUse();
+                marker.SignalSent = false;
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(RotorBehaviour), "FixedUpdate")]
+    public static class RotorPowerFixedUpdatePatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(RotorBehaviour __instance)
+        {
+            if (__instance == null) return true;
+
+            var mode = __instance.GetComponent<RotorModeMarker>();
+            if (mode != null && mode.CurrentMode != RotorModeMarker.Mode.Rotor)
+                return true;
+
+            if (__instance.Hinge == null) return true;
+            if (__instance.PhysicalBehaviour == null) return true;
+
+            float powerMul = 1f;
+            var marker = __instance.GetComponent<RotorPowerMarker>();
+            if (marker != null) powerMul = Mathf.Clamp(marker.Power / 10f, 0.1f, 10f);
+
+            JointMotor2D motor = __instance.Hinge.motor;
+            motor.maxMotorTorque = (100f + __instance.PhysicalBehaviour.Charge * 4f) * powerMul;
+            motor.motorSpeed = (__instance.Activated ? -__instance.GetScaledSpeed() : 0f);
+            __instance.Hinge.motor = motor;
+
             return false;
         }
     }
@@ -1102,12 +1223,14 @@ namespace PPGMod
             var marker = __instance.GetComponent<ServoModeMarker>();
             if (marker == null) marker = __instance.gameObject.AddComponent<ServoModeMarker>();
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "servoMode",
                 () => marker.IsGenerator ? "Switch mode: Servo" : "Switch mode: Generator",
                 "Generator mode: servo spins freely but slows down with speed, generating electricity.",
                 new UnityAction[] { delegate () { marker.IsGenerator = !marker.IsGenerator; } }
-            ));
+            );
+            btn.LabelWhenMultipleAreSelected = "Switch mode";
+            buttons.Add(btn);
         }
     }
 
@@ -1200,7 +1323,7 @@ namespace PPGMod
             for (int i = 0; i < buttons.Count; i++)
                 if (buttons[i].Identity == "setWeight") return;
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "setWeight", "Set Weight", "Set object weight in kilograms (1000 = 1 ton)",
                 new UnityAction[] { delegate ()
                 {
@@ -1221,7 +1344,9 @@ namespace PPGMod
                             m.Value = mass;
                         },
                         "Set Weight", "Weight (kg)");
-                }}));
+                }});
+            btn.LabelWhenMultipleAreSelected = "Set Weight";
+            buttons.Add(btn);
         }
     }
 
@@ -1237,23 +1362,54 @@ namespace PPGMod
             if (buttons == null) return;
 
             for (int i = 0; i < buttons.Count; i++)
-                if (buttons[i].Identity == "flipLR") return;
+                if (buttons[i].Identity == "flipObject") return;
 
-            buttons.Add(new ContextMenuButton(
-                "flipLR", "Flip left/right", "Mirror this object horizontally",
-                new UnityAction[] { delegate () {
-                    var s = __instance.transform.localScale;
-                    s.x *= -1f;
-                    __instance.transform.localScale = s;
-                }}));
+            var btn = new ContextMenuButton(
+                "flipObject", "Flip", "Mirror this object horizontally",
+                new UnityAction[] { delegate () { FlipObject(__instance); } });
+            btn.LabelWhenMultipleAreSelected = "Flip";
+            buttons.Add(btn);
+        }
 
-            buttons.Add(new ContextMenuButton(
-                "flipUD", "Flip up/down", "Mirror this object vertically",
-                new UnityAction[] { delegate () {
-                    var s = __instance.transform.localScale;
-                    s.y *= -1f;
-                    __instance.transform.localScale = s;
-                }}));
+        static void FlipObject(PhysicalBehaviour pb)
+        {
+            if (pb == null) return;
+
+            var selection = SelectionController.Main?.SelectedObjects;
+            if (selection != null && selection.Count > 1)
+            {
+                if (selection[0] != pb) return;
+
+                float centerX = 0f;
+                foreach (var obj in selection) if (obj != null) centerX += obj.transform.position.x;
+                centerX /= selection.Count;
+
+                foreach (var obj in selection)
+                {
+                    if (obj == null) continue;
+                    FlipSingle(obj.transform, centerX);
+                }
+            }
+            else
+            {
+                FlipSingle(pb.transform, pb.transform.position.x);
+            }
+        }
+
+        static void FlipSingle(Transform t, float centerX)
+        {
+            Vector3 pos = t.position;
+            pos.x = centerX - (pos.x - centerX);
+            t.position = pos;
+
+            Vector3 s = t.localScale;
+            s.x *= -1f;
+            t.localScale = s;
+
+            Vector3 e = t.eulerAngles;
+            float newZ = 180f - e.z;
+            newZ = (newZ % 360f + 360f) % 360f;
+            t.eulerAngles = new Vector3(e.x, e.y, newZ);
         }
     }
 
@@ -1294,7 +1450,7 @@ namespace PPGMod
             for (int i = 0; i < buttons.Count; i++)
                 if (buttons[i].Identity == "setDetectorRangeCustom") return;
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "setDetectorRangeCustom", "Set range", "Set detector range from 0.05 to 10 meters",
                 new UnityAction[] { delegate ()
                 {
@@ -1302,11 +1458,13 @@ namespace PPGMod
                         __instance.Range, __instance,
                         (DetectorBehaviour d, float v) => { d.Range = Mathf.Clamp(v, 0.05f, 10f); },
                         "Set detector range", "Range (0.05 - 10)");
-                }}));
+                }});
+            btn.LabelWhenMultipleAreSelected = "Set range";
+            buttons.Add(btn);
         }
     }
 
-    // ================= AERO COOLING (охлаждение от полёта) =================
+    // ================= AERO COOLING =================
     public class AeroCoolingMarker : MonoBehaviour
     {
         public float CoolingMultiplier = 1f;
@@ -1336,7 +1494,6 @@ namespace PPGMod
             var marker = __instance.GetComponent<AeroCoolingMarker>();
             if (marker == null) return;
 
-            // Линейная + угловая скорость (с ограничением)
             float linearSpeed = Mathf.Clamp(__instance.rigidbody.velocity.magnitude, 0f, 12000f);
             float angularSpeed = Mathf.Clamp(Mathf.Abs(__instance.rigidbody.angularVelocity), 0f, 12000f);
 
@@ -1346,12 +1503,9 @@ namespace PPGMod
             float diff = __instance.Temperature - ambient;
             if (Mathf.Abs(diff) < 0.1f) return;
 
-            // Учитываем теплоёмкость (массу)
             float heatCapacity = __instance.GetHeatCapacity();
             if (heatCapacity <= 0f) heatCapacity = 1f;
 
-            // Формула с учётом массы:
-            // cooling = speedFactor * multiplier * dt / heatCapacity
             float speedFactor = (linearSpeed + angularSpeed) * 0.00137f;
             float cooling = speedFactor * marker.CoolingMultiplier * Time.fixedDeltaTime / heatCapacity;
 
@@ -1397,7 +1551,7 @@ namespace PPGMod
                     if (buttons[i].Identity == "setCamAngleCaF" || buttons[i].Identity == "switchTriggerModeCaF")
                         buttons.RemoveAt(i);
 
-                buttons.Add(new ContextMenuButton(
+                var btnA = new ContextMenuButton(
                     "setCamAngleCaF", "Set angle CaF", "Set the angle at which the signal is triggered",
                     new UnityAction[] { delegate ()
                     {
@@ -1405,13 +1559,17 @@ namespace PPGMod
                             TargetAngle, this,
                             (PointerCamFollowerBehaviour b, float v) => b.TargetAngle = v,
                             "Set angle CaF", "Angle");
-                    }}));
+                    }});
+                btnA.LabelWhenMultipleAreSelected = "Set angle CaF";
+                buttons.Add(btnA);
 
-                buttons.Add(new ContextMenuButton(
+                var btnT = new ContextMenuButton(
                     "switchTriggerModeCaF",
                     () => DoubleTrigger ? "Switch trigger: Single trigger" : "Switch trigger: Double trigger",
                     "Single = one signal on reach. Double = signal on reach and on release.",
-                    new UnityAction[] { delegate () { DoubleTrigger = !DoubleTrigger; } }));
+                    new UnityAction[] { delegate () { DoubleTrigger = !DoubleTrigger; } });
+                btnT.LabelWhenMultipleAreSelected = "Switch trigger";
+                buttons.Add(btnT);
             }
         }
 
@@ -1539,11 +1697,13 @@ namespace PPGMod
             for (int i = buttons.Count - 1; i >= 0; i--)
                 if (buttons[i].Identity == "pointerSwitchMode") buttons.RemoveAt(i);
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "pointerSwitchMode",
                 IsCamFollower ? "Switch mode: Pointer" : "Switch mode: Cam Follower",
                 "Switch between Pointer and Cam Follower mode",
-                new UnityAction[] { delegate () { Toggle(); } }));
+                new UnityAction[] { delegate () { Toggle(); } });
+            btn.LabelWhenMultipleAreSelected = "Switch mode";
+            buttons.Add(btn);
         }
     }
 
@@ -1598,7 +1758,7 @@ namespace PPGMod
                     if (buttons[i].Identity == "setSpringFrequency" || buttons[i].Identity == "switchSpringDirection")
                         buttons.RemoveAt(i);
 
-                buttons.Add(new ContextMenuButton(
+                var btnF = new ContextMenuButton(
                     "setSpringFrequency", "Set Spring Power", "0 = free movement, higher = stronger spring",
                     new UnityAction[] { delegate ()
                     {
@@ -1611,14 +1771,18 @@ namespace PPGMod
                                 else if (b.SpringFrequency > 0f) b.CreateSpring();
                             },
                             "Set Spring Power", "Frequency");
-                    }}));
+                    }});
+                btnF.LabelWhenMultipleAreSelected = "Set Spring Power";
+                buttons.Add(btnF);
 
-                buttons.Add(new ContextMenuButton(
+                var btnD = new ContextMenuButton(
                     "switchSpringDirection",
                     () => Direction == SpringDirection.Inner ? "Switch spring: Middle" :
                           Direction == SpringDirection.Middle ? "Switch spring: Outer" : "Switch spring: Inner",
                     "Cycle spring direction: Inner, Middle, Outer",
-                    new UnityAction[] { delegate () { CycleDirection(); } }));
+                    new UnityAction[] { delegate () { CycleDirection(); } });
+                btnD.LabelWhenMultipleAreSelected = "Switch spring direction";
+                buttons.Add(btnD);
             }
 
             if (SpringFrequency > 0f) CreateSpring();
@@ -1736,11 +1900,13 @@ namespace PPGMod
             for (int i = buttons.Count - 1; i >= 0; i--)
                 if (buttons[i].Identity == "pistonSwitchMode") buttons.RemoveAt(i);
 
-            buttons.Add(new ContextMenuButton(
+            var btn = new ContextMenuButton(
                 "pistonSwitchMode",
                 IsSpringMode ? "Switch mode: Piston" : "Switch mode: Spring",
                 "Switch between Piston and Spring mode",
-                new UnityAction[] { delegate () { Toggle(); } }));
+                new UnityAction[] { delegate () { Toggle(); } });
+            btn.LabelWhenMultipleAreSelected = "Switch mode";
+            buttons.Add(btn);
         }
     }
 
