@@ -16,6 +16,7 @@ namespace PPGMod
     {
         public static bool K_enable = false;
         public static bool L_enable = false;
+        public static bool P_enable = false;
     }
 
     // ================= ПЛАГИН =================
