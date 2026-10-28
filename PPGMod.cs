@@ -20,7 +20,7 @@ namespace PPGMod
     }
 
     // ================= ПЛАГИН =================
-    [BepInPlugin("com.sabaka.ppgmod", "PPG Mod", "1.15.1")]
+    [BepInPlugin("com.sabaka.ppgmod", "PPG Mod", "1.16.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const float MaxRotationSpeed = 25000f;
@@ -34,8 +34,17 @@ namespace PPGMod
             try
             {
                 Physics2D.maxRotationSpeed = MaxRotationSpeed;
-                var harmony = new Harmony("com.yourname.ppgmod");
-                harmony.PatchAll();
+                var harmony = new Harmony("com.sabaka.ppgmod");
+                
+                try
+                {
+                    harmony.PatchAll();
+                }
+                catch (Exception ex)
+                {
+                    Log.LogWarning("Some patches failed to apply: " + ex.Message);
+                }
+                
                 Log.LogInfo("=== Plugin Awake COMPLETE ===");
             }
             catch (Exception ex)
@@ -50,6 +59,42 @@ namespace PPGMod
             KeyState.K_enable = Input.GetKey(KeyCode.K);
             KeyState.L_enable = Input.GetKey(KeyCode.L);
             KeyState.P_enable = Input.GetKey(KeyCode.P);
+        }
+    }
+
+    // ================= ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ (ВКЛ/ВЫКЛ) =================
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Use")]
+    public static class ModeTogglePatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null) return;
+
+            var pointerCam = __instance.GetComponent<PointerCamFollowerBehaviour>();
+            if (pointerCam != null && pointerCam.SuppressSelfToggle) return;
+
+            var rotorMarker = __instance.GetComponent<RotorModeMarker>();
+            if (rotorMarker != null && rotorMarker.SuppressSelfToggle) return;
+
+            if (rotorMarker != null)
+            {
+                rotorMarker.Enabled = !rotorMarker.Enabled;
+                Plugin.Log.LogInfo($"Rotor mode toggled: {(rotorMarker.Enabled ? "ON" : "OFF")}");
+            }
+
+            var servoMarker = __instance.GetComponent<ServoModeMarker>();
+            if (servoMarker != null)
+            {
+                servoMarker.Enabled = !servoMarker.Enabled;
+                Plugin.Log.LogInfo($"Servo mode toggled: {(servoMarker.Enabled ? "ON" : "OFF")}");
+            }
+
+            if (pointerCam != null)
+            {
+                pointerCam.Enabled = !pointerCam.Enabled;
+                Plugin.Log.LogInfo($"Pointer mode toggled: {(pointerCam.Enabled ? "ON" : "OFF")}");
+            }
         }
     }
 
@@ -185,11 +230,10 @@ namespace PPGMod
             if (__instance.GetComponent<InfiniteWireMarker>() == null)
                 __instance.gameObject.AddComponent<InfiniteWireMarker>();
 
-            // Просто ВЫКЛЮЧАЕМ физический джоинт, чтобы провод не тянул объекты
             var distanceJoint = __instance.GetComponent<DistanceJoint2D>();
             if (distanceJoint != null)
             {
-                distanceJoint.enabled = false; // <-- ВОТ ГЛАВНЫЙ ФИКС
+                distanceJoint.enabled = false;
                 distanceJoint.breakForce = float.MaxValue;
                 distanceJoint.breakTorque = float.MaxValue;
             }
@@ -257,25 +301,114 @@ namespace PPGMod
         }
     }
 
-    // ================= РЕМЕНЬ БЕЗ СКОЛЬЖЕНИЯ =================
+    // ================= НЕВИДИМЫЕ РЕМНИ (ВИЗУАЛ) =================
+    public class InvisibleBeltMarker : MonoBehaviour { }
+
+    [HarmonyPatch(typeof(SerpentineBeltBehaviour))]
+    public static class InvisibleBeltVisualPatch
+    {
+        [HarmonyPostfix]
+        [HarmonyPatch("Start")]
+        static void StartPostfix(SerpentineBeltBehaviour __instance)
+        {
+            if (__instance == null) return;
+            if (KeyState.K_enable)
+            {
+                if (__instance.GetComponent<InvisibleBeltMarker>() == null)
+                    __instance.gameObject.AddComponent<InvisibleBeltMarker>();
+            }
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch("Update")]
+        static void BeltInvisibleUpdatePatch(SerpentineBeltBehaviour __instance)
+        {
+            if (__instance == null) return;
+            var marker = __instance.GetComponent<InvisibleBeltMarker>();
+            if (marker == null) return;
+
+            var lr = __instance.GetComponent<LineRenderer>();
+            if (lr == null) lr = __instance.GetComponentInChildren<LineRenderer>(true);
+            if (lr == null) return;
+
+            Color transparent = new Color(0f, 0f, 0f, 0f);
+            lr.startColor = transparent;
+            lr.endColor = transparent;
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch("OnMouseOverlapEvent")]
+        static void PostfixOnMouseOverlap(SerpentineBeltBehaviour __instance, bool overlap)
+        {
+            if (__instance == null) return;
+            var marker = __instance.GetComponent<InvisibleBeltMarker>();
+            if (marker == null) return;
+
+            var lr = __instance.GetComponent<LineRenderer>();
+            if (lr == null) lr = __instance.GetComponentInChildren<LineRenderer>(true);
+            if (lr == null) return;
+
+            if (overlap && UserPreferenceManager.Current.ShowOutlines)
+            {
+                lr.startColor = Color.red;
+                lr.endColor = Color.red;
+            }
+            else
+            {
+                Color transparent = new Color(0f, 0f, 0f, 0f);
+                lr.startColor = transparent;
+                lr.endColor = transparent;
+            }
+        }
+    }
+
+    // ================= РЕМЕНЬ БЕЗ СКОЛЬЖЕНИЯ (ВАНИЛЬНЫЙ ВИЗУАЛ, ФИЗИКА МОДА) =================
     public class BeltNoGearRatioMarker : MonoBehaviour { }
 
     [HarmonyPatch(typeof(SerpentineBeltBehaviour))]
     public static class SlipFreeBeltPatch
     {
-        private class BeltState
-        {
-            public RelativeJoint2D Joint;
-            public float InitialRotation;
-            public float GearRatio;
-            public bool NoGearRatio;
-        }
-
-        private static readonly Dictionary<SerpentineBeltBehaviour, BeltState> States
-            = new Dictionary<SerpentineBeltBehaviour, BeltState>();
+        private static readonly Dictionary<SerpentineBeltBehaviour, RelativeJoint2D> Joints
+            = new Dictionary<SerpentineBeltBehaviour, RelativeJoint2D>();
+        private static readonly Dictionary<SerpentineBeltBehaviour, float> InitialRotations
+            = new Dictionary<SerpentineBeltBehaviour, float>();
 
         private static readonly FieldInfo GearRatioField =
             AccessTools.Field(typeof(SerpentineBeltBehaviour), "gearRatio");
+
+        private static void UpdateAngleOffset(SerpentineBeltBehaviour instance, bool force = false)
+        {
+            if (!Joints.TryGetValue(instance, out var joint) || joint == null) return;
+            if (instance.Self == null || instance.Other == null) return;
+
+            float gearRatio = 1f;
+            if (GearRatioField != null)
+            {
+                gearRatio = (float)GearRatioField.GetValue(instance);
+                if (gearRatio <= 0f) gearRatio = 1f;
+            }
+
+            if (instance.GetComponent<BeltNoGearRatioMarker>() != null)
+                gearRatio = 1f;
+
+            float gr = gearRatio - 1f;
+            float d = (instance.Self.rigidbody.rotation) * gr;
+            
+            bool paused = Global.main != null && Global.main.Paused && Time.timeScale < 0.001f;
+            
+            if (Mathf.Approximately(gr, 0f)) 
+            {
+                if (paused || force)
+                    InitialRotations[instance] = instance.Other.rigidbody.rotation - instance.Self.rigidbody.rotation;
+                joint.angularOffset = InitialRotations[instance];
+            }
+            else 
+            {
+                if (paused || force)
+                    InitialRotations[instance] = (instance.Other.rigidbody.rotation - instance.Self.rigidbody.rotation) - d;
+                joint.angularOffset = InitialRotations[instance] + d;
+            }
+        }
 
         [HarmonyPostfix]
         [HarmonyPatch("Start")]
@@ -285,48 +418,34 @@ namespace PPGMod
             if (__instance.Self == __instance.Other) return;
             if (__instance.Self.rigidbody == null || __instance.Other.rigidbody == null) return;
 
-            var existing = __instance.Self.gameObject.GetComponent<RelativeJoint2D>();
-            if (existing != null) UnityEngine.Object.Destroy(existing);
-
-            if (States.TryGetValue(__instance, out var old) && old.Joint != null)
-                UnityEngine.Object.Destroy(old.Joint);
-
-            bool noGearRatio = __instance.GetComponent<BeltNoGearRatioMarker>() != null;
-
             if (KeyState.L_enable && __instance.GetComponent<BeltNoGearRatioMarker>() == null)
-            {
                 __instance.gameObject.AddComponent<BeltNoGearRatioMarker>();
-                noGearRatio = true;
-            }
 
-            float ratio = 1f;
-            if (!noGearRatio && GearRatioField != null)
-            {
-                ratio = (float)GearRatioField.GetValue(__instance);
-                if (ratio <= 0f) ratio = 1f;
-            }
-
-            float selfRot = __instance.Self.rigidbody.rotation;
-            float otherRot = __instance.Other.rigidbody.rotation;
-            float d = selfRot * (ratio - 1f);
-            float initialRotation = (otherRot - selfRot) - d;
+            var friction = __instance.GetComponent<FrictionJoint2D>();
+            if (friction != null) UnityEngine.Object.Destroy(friction);
+            var existingRel = __instance.GetComponent<RelativeJoint2D>();
+            if (existingRel != null) UnityEngine.Object.Destroy(existingRel);
 
             var joint = __instance.Self.gameObject.AddComponent<RelativeJoint2D>();
             joint.connectedBody = __instance.Other.rigidbody;
             joint.autoConfigureOffset = false;
             joint.maxForce = 0f;
-            joint.maxTorque = 100000f;
+            joint.maxTorque = 50000f;
             joint.correctionScale = 0.5f;
             joint.enableCollision = false;
-            joint.angularOffset = initialRotation + d;
 
-            States[__instance] = new BeltState
-            {
-                Joint = joint,
-                InitialRotation = initialRotation,
-                GearRatio = ratio,
-                NoGearRatio = noGearRatio
-            };
+            Joints[__instance] = joint;
+            InitialRotations[__instance] = 0f;
+
+            UpdateAngleOffset(__instance, true); 
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch("Update")]
+        static void UpdatePrefix(SerpentineBeltBehaviour __instance)
+        {
+            if (__instance.Self == null || __instance.Other == null) return;
+            UpdateAngleOffset(__instance);
         }
 
         [HarmonyPrefix]
@@ -337,50 +456,38 @@ namespace PPGMod
             if (__instance.Self == __instance.Other) return true;
             if (__instance.Self.rigidbody == null || __instance.Other.rigidbody == null) return true;
 
-            if (!States.TryGetValue(__instance, out var state) || state.Joint == null)
+            float selfAV = __instance.Self.rigidbody.angularVelocity;
+            float otherAV = __instance.Other.rigidbody.angularVelocity;
+
+            bool hasMotor = __instance.Self.GetComponent<RotorBehaviour>() != null ||
+                            __instance.Other.GetComponent<RotorBehaviour>() != null ||
+                            __instance.Self.GetComponent<MotorisedHingeBehaviour>() != null ||
+                            __instance.Other.GetComponent<MotorisedHingeBehaviour>() != null;
+
+            if (!hasMotor)
             {
-                StartPostfix(__instance);
-                return true;
+                float limit = 5000f; 
+                if (Mathf.Abs(selfAV) > limit) __instance.Self.rigidbody.angularVelocity = Mathf.Sign(selfAV) * limit;
+                if (Mathf.Abs(otherAV) > limit) __instance.Other.rigidbody.angularVelocity = Mathf.Sign(otherAV) * limit;
             }
 
-            if (state.NoGearRatio) return false;
-
-            float ratio = state.GearRatio;
-            if (GearRatioField != null)
-            {
-                ratio = (float)GearRatioField.GetValue(__instance);
-                if (ratio <= 0f) ratio = 1f;
-
-                if (Mathf.Abs(ratio - state.GearRatio) > 0.0001f)
-                {
-                    float selfRot = __instance.Self.rigidbody.rotation;
-                    float otherRot = __instance.Other.rigidbody.rotation;
-                    float d = selfRot * (ratio - 1f);
-                    state.InitialRotation = (otherRot - selfRot) - d;
-                    state.GearRatio = ratio;
-                }
-            }
-
-            float dNew = __instance.Self.rigidbody.rotation * (ratio - 1f);
-            state.Joint.angularOffset = state.InitialRotation + dNew;
-
-            return false;
+            return false; 
         }
 
         [HarmonyPostfix]
         [HarmonyPatch("OnDestroy")]
         static void OnDestroyPostfix(SerpentineBeltBehaviour __instance)
         {
-            if (States.TryGetValue(__instance, out var state))
+            if (Joints.TryGetValue(__instance, out var joint))
             {
-                if (state.Joint != null)
-                    UnityEngine.Object.Destroy(state.Joint);
-                States.Remove(__instance);
+                if (joint != null) UnityEngine.Object.Destroy(joint);
+                Joints.Remove(__instance);
             }
+            InitialRotations.Remove(__instance);
         }
     }
 
-    // ================= PULSE DRUM: VANILLA / EXPLODE =================
+    // ================= PULSE DRUM =================
     public class PulseDrumModeMarker : MonoBehaviour
     {
         public bool ExplodeMode = false;
@@ -718,6 +825,7 @@ namespace PPGMod
         public Rigidbody2D rb;
         private GameObject holder;
         private PhysicalBehaviour _pb;
+        public bool IsActive = true;
 
         private void Start()
         {
@@ -725,35 +833,57 @@ namespace PPGMod
             if (rb == null) return;
             _pb = GetComponent<PhysicalBehaviour>();
 
-            if (_pb != null && _pb.ContextMenuOptions != null)
+            var holo = ModAPI.FindSpawnable("Holographic Display");
+            if (holo != null && holo.Prefab != null)
             {
-                var buttons = _pb.ContextMenuOptions.Buttons;
-                for (int i = buttons.Count - 1; i >= 0; i--)
-                    if (buttons[i].Identity == "AddRpmDisplay") buttons.RemoveAt(i);
+                var textT = holo.Prefab.transform.Find("Text");
+                if (textT != null)
+                {
+                    holder = new GameObject("RpmHolder");
+                    var cloned = Instantiate(textT.gameObject, holder.transform);
+                    cloned.transform.localPosition = Vector3.zero;
+                    display = cloned.GetComponent<TextMeshPro>();
+                }
             }
 
-            var holo = ModAPI.FindSpawnable("Holographic Display");
-            if (holo == null || holo.Prefab == null) return;
+            UpdateButtons();
+            if (holder != null) holder.SetActive(IsActive);
+        }
 
-            var textT = holo.Prefab.transform.Find("Text");
-            if (textT == null) return;
+        public void UpdateButtons()
+        {
+            if (_pb == null || _pb.ContextMenuOptions == null) return;
+            var buttons = _pb.ContextMenuOptions.Buttons;
+            
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "AddRpmDisplay" || buttons[i].Identity == "RemoveRpmDisplay") 
+                    buttons.RemoveAt(i);
 
-            holder = new GameObject("RpmHolder");
-            var cloned = Instantiate(textT.gameObject, holder.transform);
-            cloned.transform.localPosition = Vector3.zero;
-            display = cloned.GetComponent<TextMeshPro>();
-
-            if (_pb != null && _pb.ContextMenuOptions != null)
+            if (IsActive)
             {
-                _pb.ContextMenuOptions.Buttons.Add(new ContextMenuButton(
+                buttons.Add(new ContextMenuButton(
                     "RemoveRpmDisplay", "Remove RPM Display", "Remove RPM Display",
-                    () => Destroy(this)));
+                    new UnityAction[] { delegate () { 
+                        IsActive = false; 
+                        if (holder != null) holder.SetActive(false); 
+                        UpdateButtons(); 
+                    }}));
+            }
+            else
+            {
+                buttons.Add(new ContextMenuButton(
+                    "AddRpmDisplay", "Add RPM Display", "Shows RPM and angular velocity",
+                    new UnityAction[] { delegate () { 
+                        IsActive = true; 
+                        if (holder != null) holder.SetActive(true); 
+                        UpdateButtons(); 
+                    }}));
             }
         }
 
         private void Update()
         {
-            if (display != null && rb != null && holder != null)
+            if (IsActive && display != null && rb != null && holder != null)
             {
                 display.text = Math.Round(rb.angularVelocity / 360f * 60f, 2) + " RPM\n"
                              + Math.Round(rb.angularVelocity, 2) + " AV";
@@ -765,23 +895,6 @@ namespace PPGMod
         private void OnDestroy()
         {
             if (holder != null) Destroy(holder);
-            if (_pb != null && _pb.ContextMenuOptions != null)
-            {
-                var buttons = _pb.ContextMenuOptions.Buttons;
-                for (int i = buttons.Count - 1; i >= 0; i--)
-                    if (buttons[i].Identity == "RemoveRpmDisplay") buttons.RemoveAt(i);
-                bool hasAdd = false;
-                for (int i = 0; i < buttons.Count; i++)
-                    if (buttons[i].Identity == "AddRpmDisplay") { hasAdd = true; break; }
-                if (!hasAdd)
-                {
-                    buttons.Add(new ContextMenuButton(
-                        "AddRpmDisplay", "Add RPM Display", "Shows RPM and angular velocity",
-                        new UnityAction[] { delegate () {
-                            if (_pb.GetComponent<RpmDisplay>() == null) _pb.gameObject.AddComponent<RpmDisplay>();
-                        }}));
-                }
-            }
         }
     }
 
@@ -792,6 +905,9 @@ namespace PPGMod
         static void Postfix(PhysicalBehaviour __instance)
         {
             if (__instance == null || __instance.ContextMenuOptions == null) return;
+            
+            if (__instance.GetComponent<RpmDisplay>() != null) return;
+
             var buttons = __instance.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
@@ -801,7 +917,11 @@ namespace PPGMod
             var btn = new ContextMenuButton(
                 "AddRpmDisplay", "Add RPM Display", "Shows RPM and angular velocity above the object",
                 new UnityAction[] { delegate () {
-                    if (__instance.GetComponent<RpmDisplay>() == null) __instance.gameObject.AddComponent<RpmDisplay>();
+                    if (__instance.GetComponent<RpmDisplay>() == null) 
+                    {
+                        var rpm = __instance.gameObject.AddComponent<RpmDisplay>();
+                        rpm.IsActive = true;
+                    }
                 }});
             btn.LabelWhenMultipleAreSelected = "Add RPM Display";
             buttons.Add(btn);
@@ -933,16 +1053,28 @@ namespace PPGMod
     {
         public enum Mode { Rotor, Dynamo, Limiter }
         public Mode CurrentMode = Mode.Rotor;
+        public bool Enabled = false;
+        public bool SuppressSelfToggle = false;
 
         public bool Reversed = false;
         public float MaxAV = 0f;
-        public float MotorForce = 1f;
-        public float MotorEfficiency = 0.1f;
+        public float MotorForce = 2.5f;        
+        public float MotorEfficiency = 0.25f;   
 
         public float ThresholdAV = 500f;
         public bool DoubleTrigger = false;
         public bool SignalSent = false;
         public float OriginalDelay = -1f;
+
+        private void OnEnable()
+        {
+            // Обновляем кнопки при загрузке
+            var pb = GetComponent<PhysicalBehaviour>();
+            if (pb != null)
+            {
+                RotorModeMenuPatch.UpdateModeButtons(pb, this);
+            }
+        }
     }
 
     [HarmonyPatch(typeof(RotorBehaviour), "Start")]
@@ -981,7 +1113,7 @@ namespace PPGMod
                         default: return "Switch mode";
                     }
                 },
-                "Cycle rotor mode: Rotor → Dynamo → Limiter",
+                "Cycle rotor mode: Rotor → Dynamo → Limiter. Press F to toggle ON/OFF.",
                 new UnityAction[] { delegate () { CycleMode(__instance, marker); } }
             );
             btnMode.LabelWhenMultipleAreSelected = "Switch mode";
@@ -1018,7 +1150,7 @@ namespace PPGMod
             UpdateModeButtons(pb, marker);
         }
 
-        static void UpdateModeButtons(PhysicalBehaviour pb, RotorModeMarker marker)
+        public static void UpdateModeButtons(PhysicalBehaviour pb, RotorModeMarker marker)
         {
             if (pb == null || pb.ContextMenuOptions == null) return;
             var buttons = pb.ContextMenuOptions.Buttons;
@@ -1104,6 +1236,12 @@ namespace PPGMod
             var hinge = __instance.Hinge;
             if (hinge == null || hinge.connectedBody == null) return true;
 
+            if (!marker.Enabled)
+            {
+                hinge.useMotor = false;
+                return false;
+            }
+
             hinge.useMotor = false;
             var wheelRb = hinge.connectedBody;
 
@@ -1145,6 +1283,12 @@ namespace PPGMod
             var hinge = __instance.Hinge;
             if (hinge == null || hinge.connectedBody == null) return true;
 
+            if (!marker.Enabled)
+            {
+                hinge.useMotor = false;
+                return false;
+            }
+
             hinge.useMotor = false;
 
             var wheelRb = hinge.connectedBody;
@@ -1155,11 +1299,18 @@ namespace PPGMod
             if (!marker.SignalSent && reached)
             {
                 marker.SignalSent = true;
+                marker.SuppressSelfToggle = true;
                 pb.ForceSendUse();
+                marker.SuppressSelfToggle = false;
             }
             else if (marker.SignalSent && !reached)
             {
-                if (marker.DoubleTrigger) pb.ForceSendUse();
+                if (marker.DoubleTrigger)
+                {
+                    marker.SuppressSelfToggle = true;
+                    pb.ForceSendUse();
+                    marker.SuppressSelfToggle = false;
+                }
                 marker.SignalSent = false;
             }
 
@@ -1182,26 +1333,189 @@ namespace PPGMod
             if (__instance.Hinge == null) return true;
             if (__instance.PhysicalBehaviour == null) return true;
 
+            var hinge = __instance.Hinge;
+
+            if (mode != null && !mode.Enabled)
+            {
+                hinge.useMotor = false;
+                return false;
+            }
+
+            hinge.useMotor = true;
+
             float powerMul = 1f;
             var marker = __instance.GetComponent<RotorPowerMarker>();
             if (marker != null) powerMul = Mathf.Clamp(marker.Power / 10f, 0.1f, 10f);
 
-            JointMotor2D motor = __instance.Hinge.motor;
+            JointMotor2D motor = hinge.motor;
             motor.maxMotorTorque = (100f + __instance.PhysicalBehaviour.Charge * 4f) * powerMul;
-            motor.motorSpeed = (__instance.Activated ? -__instance.GetScaledSpeed() : 0f);
-            __instance.Hinge.motor = motor;
+            motor.motorSpeed = -__instance.GetScaledSpeed(); 
+            hinge.motor = motor;
 
             return false;
         }
     }
 
-    // ================= SERVO → GENERATOR MODE =================
+    // ================= ACCUMULATOR =================
+    public class CustomAccumulatorBehaviour : MonoBehaviour
+    {
+        public PhysicalBehaviour phys;
+        public float targetEnergy = 1000f;
+        public bool isActive = false;
+        public bool isBroken = false;
+
+        private DamagableMachineryBehaviour _damagable;
+
+        private void Start()
+        {
+            phys = GetComponent<PhysicalBehaviour>();
+            if (phys == null) return;
+
+            targetEnergy = phys.Charge;
+
+            if (phys.ContextMenuOptions != null)
+            {
+                phys.ContextMenuOptions.Buttons.Add(new ContextMenuButton(
+                    "setAccumulatorEnergy",
+                    "Set energy",
+                    "Set the target energy for this accumulator. Active accumulator will maintain this level. Max 2000.",
+                    new UnityAction[] { delegate ()
+                    {
+                        Utils.OpenFloatInputDialog<CustomAccumulatorBehaviour>(
+                            targetEnergy, this,
+                            (CustomAccumulatorBehaviour b, float v) =>
+                            {
+                                b.targetEnergy = Mathf.Clamp(v, 0f, 2000f);
+                                if (b.isActive && b.phys != null && !b.isBroken)
+                                    b.phys.Charge = b.targetEnergy;
+                            },
+                            "Set energy", "Energy (0 - 2000)");
+                    }})
+                );
+            }
+
+            _damagable = gameObject.GetComponent<DamagableMachineryBehaviour>();
+            if (_damagable == null)
+            {
+                _damagable = gameObject.AddComponent<DamagableMachineryBehaviour>();
+            }
+
+            _damagable.TemperatureThreshold = 100f;
+
+            if (_damagable.OnDamaged == null) _damagable.OnDamaged = new UnityEvent();
+            if (_damagable.OnRepaired == null) _damagable.OnRepaired = new UnityEvent();
+
+            _damagable.OnDamaged.AddListener(() =>
+            {
+                isBroken = true;
+                isActive = false;
+                Plugin.Log.LogInfo("Accumulator broken! Disabling energy output.");
+            });
+
+            _damagable.OnRepaired.AddListener(() =>
+            {
+                isBroken = false;
+                Plugin.Log.LogInfo("Accumulator repaired! Ready to be turned on.");
+            });
+
+            if (isBroken) isActive = false;
+        }
+
+        private void FixedUpdate()
+        {
+            if (phys == null || isBroken) return;
+
+            if (isActive)
+            {
+                phys.Charge = targetEnergy;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Use")]
+    public static class AccumulatorTogglePatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null) return;
+            var marker = __instance.GetComponent<CustomAccumulatorBehaviour>();
+            if (marker != null && !marker.isBroken)
+            {
+                marker.isActive = !marker.isActive;
+                Plugin.Log.LogInfo($"Accumulator toggled: {marker.isActive}");
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class AccumulatorInitPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null) return;
+
+            string objName = __instance.gameObject.name.ToLower();
+            
+            if (objName.Contains("accumulator") && !objName.Contains("battery"))
+            {
+                if (__instance.GetComponent<CustomAccumulatorBehaviour>() == null)
+                {
+                    __instance.gameObject.AddComponent<CustomAccumulatorBehaviour>();
+                }
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class RemoveBatteryEditEnergyPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null || __instance.ContextMenuOptions == null) return;
+            
+            string objName = __instance.gameObject.name.ToLower();
+            
+            if (objName.Contains("battery"))
+            {
+                var buttons = __instance.ContextMenuOptions.Buttons;
+                if (buttons == null) return;
+                
+                for (int i = buttons.Count - 1; i >= 0; i--)
+                {
+                    if (buttons[i].Identity == "setAccumulatorEnergy")
+                    {
+                        buttons.RemoveAt(i);
+                    }
+                }
+            }
+        }
+    }
+
+    // ================= SERVO → GENERATOR / BRAKE MODE =================
     public class ServoModeMarker : MonoBehaviour
     {
-        public bool IsGenerator = false;
+        public enum ServoMode { Servo, Generator, Brake }
+        public ServoMode CurrentMode = ServoMode.Servo;
+        public bool Enabled = false;
+
         public float FrictionMult = 0.1f;
         public float PowerMult = 0.05f;
         public float MinSpeed = 360f;
+
+        public float BrakeMaxCharge = 4.5f; // Ванильный лимит 4.5
+        public float BrakeForceMult = 5f;
+
+        private void OnEnable()
+        {
+            var pb = GetComponent<PhysicalBehaviour>();
+            if (pb != null)
+            {
+                ServoGeneratorMenuPatch.UpdateModeButtons(pb, this);
+            }
+        }
     }
 
     [HarmonyPatch(typeof(MotorisedHingeBehaviour), "Start")]
@@ -1217,53 +1531,173 @@ namespace PPGMod
             var buttons = pb.ContextMenuOptions.Buttons;
             if (buttons == null) return;
 
-            for (int i = 0; i < buttons.Count; i++)
-                if (buttons[i].Identity == "servoMode") return;
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "servoMode" || buttons[i].Identity == "servoBrakeMaxCharge")
+                    buttons.RemoveAt(i);
 
             var marker = __instance.GetComponent<ServoModeMarker>();
             if (marker == null) marker = __instance.gameObject.AddComponent<ServoModeMarker>();
 
             var btn = new ContextMenuButton(
                 "servoMode",
-                () => marker.IsGenerator ? "Switch mode: Servo" : "Switch mode: Generator",
-                "Generator mode: servo spins freely but slows down with speed, generating electricity.",
-                new UnityAction[] { delegate () { marker.IsGenerator = !marker.IsGenerator; } }
+                () =>
+                {
+                    switch (marker.CurrentMode)
+                    {
+                        case ServoModeMarker.ServoMode.Servo: return "Switch mode: Generator";
+                        case ServoModeMarker.ServoMode.Generator: return "Switch mode: Brake";
+                        case ServoModeMarker.ServoMode.Brake: return "Switch mode: Servo";
+                        default: return "Switch mode";
+                    }
+                },
+                "Cycle servo mode: Servo → Generator → Brake. Press F to toggle ON/OFF.",
+                new UnityAction[] { delegate () { CycleMode(__instance, marker); } }
             );
             btn.LabelWhenMultipleAreSelected = "Switch mode";
             buttons.Add(btn);
+
+            UpdateModeButtons(pb, marker);
+        }
+
+        static void CycleMode(MotorisedHingeBehaviour servo, ServoModeMarker marker)
+        {
+            if (marker.CurrentMode == ServoModeMarker.ServoMode.Servo)
+                marker.CurrentMode = ServoModeMarker.ServoMode.Generator;
+            else if (marker.CurrentMode == ServoModeMarker.ServoMode.Generator)
+                marker.CurrentMode = ServoModeMarker.ServoMode.Brake;
+            else
+                marker.CurrentMode = ServoModeMarker.ServoMode.Servo;
+
+            UpdateModeButtons(servo.PhysicalBehaviour, marker);
+        }
+
+        public static void UpdateModeButtons(PhysicalBehaviour pb, ServoModeMarker marker)
+        {
+            if (pb == null || pb.ContextMenuOptions == null) return;
+            var buttons = pb.ContextMenuOptions.Buttons;
+
+            for (int i = buttons.Count - 1; i >= 0; i--)
+                if (buttons[i].Identity == "servoBrakeMaxCharge")
+                    buttons.RemoveAt(i);
+
+            if (marker.CurrentMode == ServoModeMarker.ServoMode.Brake)
+            {
+                var btnCharge = new ContextMenuButton(
+                    "servoBrakeMaxCharge",
+                    "Set max charge",
+                    "Maximum charge required for maximum braking force. Default 4.75.",
+                    new UnityAction[] { delegate ()
+                    {
+                        Utils.OpenFloatInputDialog<ServoModeMarker>(
+                            marker.BrakeMaxCharge, marker,
+                            (ServoModeMarker m, float v) => m.BrakeMaxCharge = Mathf.Max(0.1f, v),
+                            "Set max charge", "Max charge");
+                    }}
+                );
+                btnCharge.LabelWhenMultipleAreSelected = "Set max charge";
+                buttons.Add(btnCharge);
+            }
         }
     }
 
     [HarmonyPatch(typeof(MotorisedHingeBehaviour), "FixedUpdate")]
     public static class ServoGeneratorPatch
     {
+        private static readonly Dictionary<MotorisedHingeBehaviour, float> LockedAngles
+            = new Dictionary<MotorisedHingeBehaviour, float>();
+
         [HarmonyPrefix]
         static bool Prefix(MotorisedHingeBehaviour __instance)
         {
             if (__instance == null) return true;
             var marker = __instance.GetComponent<ServoModeMarker>();
-            if (marker == null || !marker.IsGenerator) return true;
+            if (marker == null || marker.CurrentMode == ServoModeMarker.ServoMode.Servo) return true;
 
             var pb = __instance.PhysicalBehaviour;
             if (pb == null) return true;
             var hinge = __instance.Hinge;
             if (hinge == null) return true;
 
-            hinge.useMotor = false;
-            var wheelRb = hinge.connectedBody;
-            if (wheelRb == null) return false;
-
-            float angVel = wheelRb.angularVelocity;
+            float angVel = hinge.connectedBody != null ? hinge.connectedBody.angularVelocity : 0f;
             float angVelAbs = Mathf.Abs(angVel);
 
-            if (angVelAbs > marker.MinSpeed)
+            if (marker.CurrentMode == ServoModeMarker.ServoMode.Generator)
             {
-                float chargeVal = (angVelAbs / 360f) * marker.PowerMult * wheelRb.mass;
-                pb.Charge = Mathf.Min(pb.Charge + chargeVal, 1000f);
-                wheelRb.AddTorque(-angVel * marker.FrictionMult);
+                hinge.useMotor = false;
+                if (!marker.Enabled) return false;
+                
+                if (angVelAbs > marker.MinSpeed && hinge.connectedBody != null)
+                {
+                    float chargeVal = (angVelAbs / 360f) * marker.PowerMult * hinge.connectedBody.mass;
+                    pb.Charge = Mathf.Min(pb.Charge + chargeVal, 1000f);
+                    hinge.connectedBody.AddTorque(-angVel * marker.FrictionMult);
+                }
+                return false;
+            }
+            
+            else if (marker.CurrentMode == ServoModeMarker.ServoMode.Brake)
+            {
+                // Если выключен или нет заряда — свободное вращение
+                if (!marker.Enabled || pb.Charge <= 0.01f)
+                {
+                    hinge.useMotor = false;
+                    LockedAngles.Remove(__instance);
+                    return false;
+                }
+
+                float chargeRatio = Mathf.Clamp01(pb.Charge / marker.BrakeMaxCharge);
+
+                // Если заряд >= 100% (или больше)
+                if (chargeRatio >= 0.99f)
+                {
+                    if (!LockedAngles.ContainsKey(__instance))
+                    {
+                        // Запоминаем текущий угол
+                        LockedAngles[__instance] = hinge.jointAngle;
+                        Plugin.Log.LogInfo($"Brake locked at angle: {hinge.jointAngle}");
+                    }
+
+                    // === ЖЕСТКАЯ ФИКСАЦИЯ УГЛА ===
+                    hinge.useMotor = true;
+                    
+                    JointMotor2D motor = hinge.motor;
+                    float angleDiff = Mathf.DeltaAngle(hinge.jointAngle, LockedAngles[__instance]);
+                    
+                    // Пропорциональное управление для возврата к углу
+                    motor.motorSpeed = angleDiff * 10f; 
+                    
+                    motor.maxMotorTorque = 100000f * Mathf.Abs(angleDiff);
+                    if (motor.maxMotorTorque < 5000f) motor.maxMotorTorque = 5000f;
+
+                    hinge.motor = motor;
+
+                    // Гасим скорость
+                    if (hinge.connectedBody != null)
+                    {
+                        hinge.connectedBody.angularVelocity *= 0.1f;
+                        if (Mathf.Abs(hinge.connectedBody.angularVelocity) < 2f)
+                            hinge.connectedBody.angularVelocity = 0f;
+                    }
+                }
+                else
+                {
+                    // Если заряд меньше 100% — просто тормозим (вязкое трение)
+                    hinge.useMotor = false;
+                    LockedAngles.Remove(__instance);
+
+                    if (hinge.connectedBody != null)
+                    {
+                        float frictionFactor = 1.0f - (chargeRatio * 0.99f);
+                        hinge.connectedBody.angularVelocity *= frictionFactor;
+                        if (Mathf.Abs(hinge.connectedBody.angularVelocity) < 5f)
+                            hinge.connectedBody.angularVelocity = 0f;
+                    }
+                }
+
+                return false;
             }
 
-            return false;
+            return true;
         }
     }
 
@@ -1522,6 +1956,8 @@ namespace PPGMod
         public float TargetAngle = 90f;
         public float Tolerance = 0.97f;
         public bool DoubleTrigger = false;
+        public bool Enabled = false;
+        public bool SuppressSelfToggle = false;
         public PhysicalBehaviour phys;
         public Transform Wheel;
         public SpriteRenderer Light;
@@ -1571,12 +2007,16 @@ namespace PPGMod
                 btnT.LabelWhenMultipleAreSelected = "Switch trigger";
                 buttons.Add(btnT);
             }
+
+            var switcher = GetComponent<PointerModeSwitcher>();
+            if (switcher != null) switcher.UpdateButton();
         }
 
         private void OnDestroy() { if (phys != null) phys.ActivationPropagationDelay = _originalDelay; }
 
         private void FixedUpdate()
         {
+            if (!Enabled) return;
             if (Wheel == null || phys == null) return;
 
             lastDegree = currentDegree;
@@ -1590,12 +2030,19 @@ namespace PPGMod
             if (!done && nowReached)
             {
                 done = true;
+                SuppressSelfToggle = true;
                 phys.ForceSendUse();
+                SuppressSelfToggle = false;
                 if (Light != null) Light.enabled = true;
             }
             else if (!nowReached && done)
             {
-                if (DoubleTrigger) phys.ForceSendUse();
+                if (DoubleTrigger)
+                {
+                    SuppressSelfToggle = true;
+                    phys.ForceSendUse();
+                    SuppressSelfToggle = false;
+                }
                 done = false;
                 if (Light != null) Light.enabled = false;
             }
@@ -1688,7 +2135,7 @@ namespace PPGMod
             UpdateButton();
         }
 
-        private void UpdateButton()
+        public void UpdateButton()
         {
             if (Pointer == null || Pointer.PhysicalBehaviour == null || Pointer.PhysicalBehaviour.ContextMenuOptions == null) return;
             var buttons = Pointer.PhysicalBehaviour.ContextMenuOptions.Buttons;
@@ -1700,7 +2147,7 @@ namespace PPGMod
             var btn = new ContextMenuButton(
                 "pointerSwitchMode",
                 IsCamFollower ? "Switch mode: Pointer" : "Switch mode: Cam Follower",
-                "Switch between Pointer and Cam Follower mode",
+                "Switch between Pointer and Cam Follower mode. Press F to toggle ON/OFF.",
                 new UnityAction[] { delegate () { Toggle(); } });
             btn.LabelWhenMultipleAreSelected = "Switch mode";
             buttons.Add(btn);
@@ -1915,5 +2362,151 @@ namespace PPGMod
     {
         [HarmonyPostfix]
         static void Postfix(PistonBehaviour __instance) { PistonModeSwitcher.AddTo(__instance.gameObject); }
+    }
+
+    // ================= FLIP 90° =================
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class Flip90MenuPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null || __instance.ContextMenuOptions == null) return;
+            var buttons = __instance.ContextMenuOptions.Buttons;
+            if (buttons == null) return;
+
+            for (int i = 0; i < buttons.Count; i++)
+                if (buttons[i].Identity == "flip90Object") return;
+
+            var btn = new ContextMenuButton(
+                "flip90Object", "Flip 90°", "Rotate this object +90 degrees from its current rotation",
+                new UnityAction[] { delegate () { Flip90Object(__instance); } });
+            btn.LabelWhenMultipleAreSelected = "Flip 90°";
+            buttons.Add(btn);
+        }
+
+        static void Flip90Object(PhysicalBehaviour pb)
+        {
+            if (pb == null) return;
+
+            var selection = SelectionController.Main?.SelectedObjects;
+            if (selection != null && selection.Count > 1)
+            {
+                if (selection[0] != pb) return;
+                foreach (var obj in selection) if (obj != null) obj.transform.Rotate(0, 0, 90f);
+            }
+            else
+            {
+                pb.transform.Rotate(0, 0, 90f);
+            }
+        }
+    }
+
+    // ================= SET FRICTION =================
+    public class FrictionMarker : MonoBehaviour
+    {
+        public float Value = -1f;
+        public PhysicsMaterial2D OriginalMaterial;
+        public float OriginalFriction = 0.4f;
+
+        private void Start()
+        {
+            var pb = GetComponent<PhysicalBehaviour>();
+            if (pb != null && Value >= 0)
+            {
+                // Принудительно применяем сохраненное трение при загрузке
+                FrictionMenuPatch.ApplyFriction(pb, this);
+            }
+        }
+    }
+    
+    [HarmonyPatch(typeof(PhysicalBehaviour), "Start")]
+    public static class FrictionMenuPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(PhysicalBehaviour __instance)
+        {
+            if (__instance == null || __instance.ContextMenuOptions == null) return;
+            if (__instance.gameObject.name.ToLower().Contains("wheel")) return;
+    
+            var buttons = __instance.ContextMenuOptions.Buttons;
+            if (buttons == null) return;
+    
+            var marker = __instance.GetComponent<FrictionMarker>();
+            if (marker == null)
+            {
+                marker = __instance.gameObject.AddComponent<FrictionMarker>();
+                var col = __instance.GetComponent<Collider2D>();
+                if (col != null && col.sharedMaterial != null)
+                {
+                    marker.OriginalMaterial = col.sharedMaterial;
+                    marker.OriginalFriction = col.sharedMaterial.friction;
+                    marker.Value = marker.OriginalFriction * 100f;
+                }
+                else
+                {
+                    marker.OriginalMaterial = null;
+                    marker.OriginalFriction = 0.4f;
+                    marker.Value = 40f;
+                }
+            }
+    
+            for (int i = 0; i < buttons.Count; i++)
+                if (buttons[i].Identity == "setFriction") return;
+    
+            var btn = new ContextMenuButton(
+                "setFriction", "Set friction", "0 = maximum sliding, 100 = maximum grip",
+                new UnityAction[] { delegate ()
+                {
+                    var m = __instance.GetComponent<FrictionMarker>();
+                    if (m == null) return;
+                    Utils.OpenFloatInputDialog<FrictionMarker>(
+                        m.Value, m,
+                        (FrictionMarker mk, float v) =>
+                        {
+                            mk.Value = Mathf.Clamp(v, 0f, 100f);
+                            ApplyFriction(__instance, mk);
+                        },
+                        "Set friction", "Friction (0 - 100)");
+                }});
+            btn.LabelWhenMultipleAreSelected = "Set friction";
+            buttons.Add(btn);
+        }
+    
+        public static void ApplyFriction(PhysicalBehaviour pb, FrictionMarker marker)
+        {
+            if (pb == null) return;
+            var colliders = pb.GetComponents<Collider2D>();
+            if (colliders == null || colliders.Length == 0) return;
+    
+            if (Mathf.Abs(marker.Value - marker.OriginalFriction * 100f) < 1f)
+            {
+                foreach (var col in colliders)
+                {
+                    col.sharedMaterial = marker.OriginalMaterial;
+                    col.enabled = false;
+                    col.enabled = true;
+                }
+                return;
+            }
+    
+            float friction = (marker.Value / 100f) * 5f;
+    
+            foreach (var col in colliders)
+            {
+                if (col.sharedMaterial == null || !col.sharedMaterial.name.Contains("Friction_Custom"))
+                {
+                    var mat = new PhysicsMaterial2D("Friction_Custom_" + pb.GetInstanceID());
+                    mat.bounciness = 0f;
+                    col.sharedMaterial = mat;
+                }
+    
+                col.sharedMaterial.friction = friction;
+                col.enabled = false;
+                col.enabled = true;
+    
+                if (pb.rigidbody != null) pb.rigidbody.WakeUp();
+            }
+        }
     }
 }
